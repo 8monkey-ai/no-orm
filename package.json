@@ -1,0 +1,59 @@
+{
+  "name": "@8monkey/no-orm",
+  "version": "0.1.0-rc0",
+  "description": "A tiny, composable ORM core for TS libraries - no heavy abstractions, just the primitives.",
+  "keywords": [
+    "database",
+    "schema",
+    "migration",
+    "orm",
+    "library",
+    "postgresql",
+    "mysql",
+    "sqlite",
+    "greptime"
+  ],
+  "homepage": "https://hebo.ai",
+  "bugs": {
+    "url": "https://github.com/8monkey-ai/no-orm/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/8monkey-ai/no-orm.git"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "clean": "git clean -fdx -e '.env*' .",
+    "format": "oxfmt .",
+    "format:staged": "oxfmt --no-error-on-unmatched-pattern",
+    "lint": "oxlint",
+    "lint:staged": "oxlint --fix",
+    "typecheck": "oxlint --type-check",
+    "test": "bun test",
+    "check": "bun lint && bun typecheck",
+    "fix": "bun lint:staged && bun format:staged"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "oxfmt": "^0.44.0",
+    "oxlint": "^1.59.0",
+    "oxlint-tsgolint": "^0.20.0",
+    "typescript": "^6.0.2"
+  },
+  "peerDependencies": {},
+  "peerDependenciesMeta": {}
+}
