@@ -4,14 +4,14 @@
   "description": "A tiny, composable ORM core for TS libraries - no heavy abstractions, just the primitives.",
   "keywords": [
     "database",
-    "schema",
-    "migration",
-    "orm",
+    "greptime",
     "library",
-    "postgresql",
+    "migration",
     "mysql",
-    "sqlite",
-    "greptime"
+    "orm",
+    "postgresql",
+    "schema",
+    "sqlite"
   ],
   "homepage": "https://hebo.ai",
   "bugs": {

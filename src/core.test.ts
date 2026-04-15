@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+
 import type { InferModel, Schema } from "./core";
 
 describe("no-orm core", () => {

@@ -33,7 +33,10 @@ export const schema = {
     },
     indexes: [
       {
-        fields: [{ field: "created_at", order: "desc" }, { field: "id", order: "desc" }],
+        fields: [
+          { field: "created_at", order: "desc" },
+          { field: "id", order: "desc" },
+        ],
       },
     ],
   },

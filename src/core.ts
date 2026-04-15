@@ -27,7 +27,7 @@ export type FieldType =
   | { type: "json" };
 
 export interface Index {
-  fields: IndexField[];
+  fields: [IndexField, ...IndexField[]];
 }
 
 export interface IndexField {
@@ -88,10 +88,7 @@ export interface Adapter {
     select?: Select<T>;
   }): Promise<T>;
 
-  delete<T = Record<string, unknown>>(args: {
-    model: string;
-    where: Where<T>;
-  }): Promise<void>;
+  delete<T = Record<string, unknown>>(args: { model: string; where: Where<T> }): Promise<void>;
 
   deleteMany?<T = Record<string, unknown>>(args: {
     model: string;
@@ -114,10 +111,7 @@ export interface Adapter {
     cursor?: Cursor<T>;
   }): Promise<T[]>;
 
-  count?<T = Record<string, unknown>>(args: {
-    model: string;
-    where?: Where<T>;
-  }): Promise<number>;
+  count?<T = Record<string, unknown>>(args: { model: string; where?: Where<T> }): Promise<number>;
 }
 
 export type FieldName<T> = Extract<keyof T, string>;
