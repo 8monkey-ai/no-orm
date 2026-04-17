@@ -62,25 +62,25 @@ export interface Adapter {
 
   transaction?<T>(fn: (tx: Adapter) => Promise<T>): Promise<T>;
 
-  create<T = Record<string, unknown>>(args: {
+  create<T extends Record<string, unknown> = Record<string, unknown>>(args: {
     model: string;
     data: T;
     select?: Select<T>;
   }): Promise<T>;
 
-  update<T = Record<string, unknown>>(args: {
+  update<T extends Record<string, unknown> = Record<string, unknown>>(args: {
     model: string;
     where: Where<T>;
     data: Partial<T>;
   }): Promise<T | null>;
 
-  updateMany<T = Record<string, unknown>>(args: {
+  updateMany<T extends Record<string, unknown> = Record<string, unknown>>(args: {
     model: string;
     where?: Where<T>;
     data: Partial<T>;
   }): Promise<number>;
 
-  upsert?<T = Record<string, unknown>>(args: {
+  upsert?<T extends Record<string, unknown> = Record<string, unknown>>(args: {
     model: string;
     where: Where<T>;
     create: T;
@@ -88,20 +88,23 @@ export interface Adapter {
     select?: Select<T>;
   }): Promise<T>;
 
-  delete<T = Record<string, unknown>>(args: { model: string; where: Where<T> }): Promise<void>;
+  delete<T extends Record<string, unknown> = Record<string, unknown>>(args: {
+    model: string;
+    where: Where<T>;
+  }): Promise<void>;
 
-  deleteMany?<T = Record<string, unknown>>(args: {
+  deleteMany?<T extends Record<string, unknown> = Record<string, unknown>>(args: {
     model: string;
     where?: Where<T>;
   }): Promise<number>;
 
-  find<T = Record<string, unknown>>(args: {
+  find<T extends Record<string, unknown> = Record<string, unknown>>(args: {
     model: string;
     where: Where<T>;
     select?: Select<T>;
   }): Promise<T | null>;
 
-  findMany<T = Record<string, unknown>>(args: {
+  findMany<T extends Record<string, unknown> = Record<string, unknown>>(args: {
     model: string;
     where?: Where<T>;
     select?: Select<T>;
@@ -111,7 +114,10 @@ export interface Adapter {
     cursor?: Cursor<T>;
   }): Promise<T[]>;
 
-  count?<T = Record<string, unknown>>(args: { model: string; where?: Where<T> }): Promise<number>;
+  count?<T extends Record<string, unknown> = Record<string, unknown>>(args: {
+    model: string;
+    where?: Where<T>;
+  }): Promise<number>;
 }
 
 export type FieldName<T> = Extract<keyof T, string>;
