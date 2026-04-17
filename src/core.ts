@@ -120,7 +120,7 @@ export interface Adapter {
   }): Promise<number>;
 }
 
-export type FieldName<T> = Extract<keyof T, string>;
+export type FieldName<T> = Extract<keyof T, string> | `${Extract<keyof T, string>}->>${string}`;
 
 export type Select<T> = ReadonlyArray<FieldName<T>>;
 

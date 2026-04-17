@@ -513,7 +513,18 @@ export class SqliteAdapter implements Adapter {
 
     const leaf = where as { field: string; op: string; value: unknown };
     const { field, op, value } = leaf;
-    const quotedField = this.quote(field);
+
+    let quotedField: string;
+    if (field.includes("->>")) {
+      const parts = field.split("->>");
+      const topLevelColumn = parts[0];
+      if (topLevelColumn === undefined) throw new Error("Invalid JSON path");
+
+      const jsonPath = `$.${parts.slice(1).join(".")}`;
+      quotedField = `json_extract(${this.quote(topLevelColumn)}, '${jsonPath}')`;
+    } else {
+      quotedField = this.quote(field);
+    }
 
     switch (op) {
       case "eq":

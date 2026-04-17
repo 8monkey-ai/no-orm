@@ -108,6 +108,66 @@ describe("SqliteAdapter", () => {
     expect(found.map((f) => f.name)).toContain("Charlie");
   });
 
+  it("should handle nested JSON path filtering with `->>` syntax", async () => {
+    await adapter.create({
+      model: "users",
+      data: {
+        id: "j1",
+        name: "User1",
+        age: 20,
+        is_active: true,
+        metadata: { theme: "dark", window: { width: 800 } },
+      },
+    });
+    await adapter.create({
+      model: "users",
+      data: {
+        id: "j2",
+        name: "User2",
+        age: 20,
+        is_active: true,
+        metadata: { theme: "light", window: { width: 1024 } },
+      },
+    });
+    await adapter.create({
+      model: "users",
+      data: {
+        id: "j3",
+        name: "User3",
+        age: 20,
+        is_active: true,
+        metadata: { theme: "dark", window: { width: 1920 } },
+      },
+    });
+
+    // 1. Exact match on nested string (theme = 'dark')
+    const darkUsers = await adapter.findMany<User>({
+      model: "users",
+      where: { field: "metadata->>theme", op: "eq", value: "dark" },
+    });
+    expect(darkUsers).toHaveLength(2);
+    expect(darkUsers.map((u) => u.name)).toContain("User1");
+    expect(darkUsers.map((u) => u.name)).toContain("User3");
+
+    // 2. Numeric operator on deeply nested number (window.width > 900)
+    const wideUsers = await adapter.findMany<User>({
+      model: "users",
+      where: { field: "metadata->>window->>width", op: "gt", value: 900 },
+    });
+    expect(wideUsers).toHaveLength(2);
+    expect(wideUsers.map((u) => u.name)).toContain("User2");
+    expect(wideUsers.map((u) => u.name)).toContain("User3");
+
+    // 3. IN operator on nested string
+    const specificUsers = await adapter.findMany<User>({
+      model: "users",
+      where: { field: "metadata->>window->>width", op: "in", value: [800, 1024] },
+    });
+    expect(specificUsers).toHaveLength(2);
+    expect(specificUsers.map((u) => u.name)).toContain("User1");
+    expect(specificUsers.map((u) => u.name)).toContain("User2");
+  });
+
   it("should update a record", async () => {
     await adapter.create({
       model: "users",
