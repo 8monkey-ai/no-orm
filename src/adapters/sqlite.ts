@@ -3,25 +3,6 @@ import type { Adapter, Cursor, FieldName, Schema, Select, SortBy, Where } from "
 export type SqliteValue = string | number | bigint | Uint8Array | null;
 
 /**
- * Standard type guards for safe runtime-to-static bridging.
- */
-export function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
-function isValidField<T>(field: unknown): field is FieldName<T> {
-  return typeof field === "string" && field !== "";
-}
-
-function isStringKey(key: unknown): key is string {
-  return typeof key === "string" && key !== "";
-}
-
-function isModelType<T>(obj: unknown): obj is T {
-  return typeof obj === "object" && obj !== null;
-}
-
-/**
  * The standard connection interface the Adapter expects.
  */
 export interface SqliteDatabase {
@@ -89,7 +70,8 @@ export class SqliteAdapter implements Adapter {
 
       const pk = `PRIMARY KEY (${model.primaryKey.fields.map((f) => this.quote(f)).join(", ")})`;
 
-      // Execute migrations sequentially
+      // Migrations (CREATE TABLE / CREATE INDEX) must be executed sequentially
+      // to prevent database locking errors and ensure dependent objects exist.
       // eslint-disable-next-line no-await-in-loop
       await this.db.run(
         `CREATE TABLE IF NOT EXISTS ${this.quote(name)} (${columns.join(", ")}, ${pk})`,
@@ -104,6 +86,8 @@ export class SqliteAdapter implements Adapter {
             .map((f) => `${this.quote(f.field)}${f.order ? ` ${f.order.toUpperCase()}` : ""}`)
             .join(", ");
           const indexName = `idx_${name}_${i}`;
+          // Migrations (CREATE TABLE / CREATE INDEX) must be executed sequentially
+          // to prevent database locking errors and ensure dependent objects exist.
           // eslint-disable-next-line no-await-in-loop
           await this.db.run(
             `CREATE INDEX IF NOT EXISTS ${this.quote(indexName)} ON ${this.quote(name)} (${fields})`,
@@ -123,11 +107,9 @@ export class SqliteAdapter implements Adapter {
     const mappedData = this.mapInput(model, data);
     const fields = Object.keys(mappedData);
 
-    // Avoid mapping strings over and over, pre-allocate placeholders
     const placeholders = Array.from({ length: fields.length }).fill("?").join(", ");
     const columns = fields.map((f) => this.quote(f)).join(", ");
 
-    // Avoid spreads
     const params: SqliteValue[] = [];
     for (let i = 0; i < fields.length; i++) {
       const field = fields[i];
@@ -200,7 +182,9 @@ export class SqliteAdapter implements Adapter {
     const sql_parts: string[] = [query];
 
     if (where !== undefined || cursor !== undefined) {
-      const { sql, params } = this.buildWhere(where, cursor);
+      // Determine cursor direction based on the first sort field, defaulting to asc
+      const isAsc = !sortBy || !sortBy[0] || sortBy[0].direction !== "desc";
+      const { sql, params } = this.buildWhere(where, cursor, isAsc ? "asc" : "desc");
       sql_parts.push(`WHERE ${sql}`);
       for (let i = 0; i < params.length; i++) {
         const param = params[i];
@@ -241,7 +225,6 @@ export class SqliteAdapter implements Adapter {
 
     const { sql: whereSql, params: whereParams } = this.buildWhere(where);
 
-    // Avoid spreads
     const params: SqliteValue[] = [];
     for (let i = 0; i < fields.length; i++) {
       const field = fields[i];
@@ -267,7 +250,6 @@ export class SqliteAdapter implements Adapter {
     const fields = Object.keys(mappedData);
     const setClause = fields.map((f) => `${this.quote(f)} = ?`).join(", ");
 
-    // Avoid spreads
     const args_sql: SqliteValue[] = [];
     for (let i = 0; i < fields.length; i++) {
       const field = fields[i];
@@ -400,12 +382,10 @@ export class SqliteAdapter implements Adapter {
   }
 
   async transaction<T>(fn: (tx: Adapter) => Promise<T>): Promise<T> {
-    // Generate a unique savepoint identifier for nested transactions
     const sp = `sp_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
 
     await this.db.run(`SAVEPOINT ${sp}`, []);
     try {
-      // By passing `this`, all sub-queries inherently participate in the active connection's savepoint
       const result = await fn(this);
       await this.db.run(`RELEASE SAVEPOINT ${sp}`, []);
       return result;
@@ -448,6 +428,7 @@ export class SqliteAdapter implements Adapter {
   private buildWhere<T>(
     where?: Where<T>,
     cursor?: Cursor<T>,
+    cursorDirection: "asc" | "desc" = "asc",
   ): { sql: string; params: SqliteValue[] } {
     const params: SqliteValue[] = [];
     const parts: string[] = [];
@@ -465,8 +446,9 @@ export class SqliteAdapter implements Adapter {
       const entries = Object.entries(cursor.after);
       if (entries.length > 0) {
         const cursorParts: string[] = [];
+        const operator = cursorDirection === "asc" ? ">" : "<";
         for (const [field, value] of entries) {
-          cursorParts.push(`${this.quote(field)} > ?`);
+          cursorParts.push(`${this.quote(field)} ${operator} ?`);
           params.push(this.mapWhereValue(value));
         }
         parts.push(`(${cursorParts.join(" AND ")})`);
@@ -625,7 +607,6 @@ export class SqliteAdapter implements Adapter {
       throw new Error("Invalid row data");
     }
 
-    // Mutate the raw row dictionary in-place rather than spreading `{ ...row }`
     for (const [fieldName, field] of Object.entries(model.fields)) {
       const val = row[fieldName];
       if (val === undefined || val === null) continue;
@@ -644,4 +625,20 @@ export class SqliteAdapter implements Adapter {
     if (isModelType<T>(row)) return row;
     throw new Error("Row does not conform to model bounds");
   }
+}
+
+export function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function isValidField<T>(field: unknown): field is FieldName<T> {
+  return typeof field === "string" && field !== "";
+}
+
+function isStringKey(key: unknown): key is string {
+  return typeof key === "string" && key !== "";
+}
+
+function isModelType<T>(obj: unknown): obj is T {
+  return typeof obj === "object" && obj !== null;
 }

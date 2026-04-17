@@ -58,10 +58,16 @@ export type Conversation = InferModel<typeof schema.conversations>;
 import { Adapter } from "@8monkey/no-orm";
 // Import a concrete adapter (e.g., @8monkey/no-orm-sqlite)
 
-const adapter: Adapter = new SqliteAdapter({ schema, db });
+const adapter: Adapter = new SqliteAdapter(schema, db);
 
 // Minimal Schema Bootstrap
-await adapter.migrate({ schema });
+await adapter.migrate();
+
+// You can seamlessly query nested JSON!
+const darkUsers = await adapter.findMany({
+  model: "conversations",
+  where: { field: "metadata->>theme", op: "eq", value: "dark" },
+});
 
 // Create a record
 const conv = await adapter.create({

@@ -367,4 +367,68 @@ describe("SqliteAdapter", () => {
       expect(inner).toBeNull();
     });
   });
+
+  describe("Pagination", () => {
+    beforeEach(async () => {
+      // Seed data for pagination
+      const creations = [];
+      for (let i = 1; i <= 5; i++) {
+        creations.push(
+          adapter.create({
+            model: "users",
+            data: { id: `p${i}`, name: `User ${i}`, age: 20 + i, is_active: true, metadata: null },
+          }),
+        );
+      }
+      await Promise.all(creations);
+    });
+
+    it("should respect limit and offset", async () => {
+      const page1 = await adapter.findMany<User>({
+        model: "users",
+        sortBy: [{ field: "age", direction: "asc" }],
+        limit: 2,
+        offset: 0,
+      });
+      expect(page1).toHaveLength(2);
+      expect(page1[0]?.name).toBe("User 1");
+      expect(page1[1]?.name).toBe("User 2");
+
+      const page2 = await adapter.findMany<User>({
+        model: "users",
+        sortBy: [{ field: "age", direction: "asc" }],
+        limit: 2,
+        offset: 2,
+      });
+      expect(page2).toHaveLength(2);
+      expect(page2[0]?.name).toBe("User 3");
+      expect(page2[1]?.name).toBe("User 4");
+    });
+
+    it("should handle cursor pagination ascending", async () => {
+      const result = await adapter.findMany<User>({
+        model: "users",
+        sortBy: [{ field: "age", direction: "asc" }],
+        cursor: { after: { age: 22 } },
+        limit: 2,
+      });
+
+      expect(result).toHaveLength(2);
+      expect(result[0]?.name).toBe("User 3"); // age 23 > 22
+      expect(result[1]?.name).toBe("User 4"); // age 24 > 22
+    });
+
+    it("should handle cursor pagination descending", async () => {
+      const result = await adapter.findMany<User>({
+        model: "users",
+        sortBy: [{ field: "age", direction: "desc" }],
+        cursor: { after: { age: 24 } },
+        limit: 2,
+      });
+
+      expect(result).toHaveLength(2);
+      expect(result[0]?.name).toBe("User 3"); // age 23 < 24
+      expect(result[1]?.name).toBe("User 2"); // age 22 < 24
+    });
+  });
 });
