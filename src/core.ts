@@ -120,23 +120,26 @@ export interface Adapter {
   }): Promise<number>;
 }
 
-export type FieldName<T> = Extract<keyof T, string> | `${Extract<keyof T, string>}->>${string}`;
+export type FieldName<T> = Extract<keyof T, string>;
 
 export type Select<T> = ReadonlyArray<FieldName<T>>;
 
 export type Where<T = Record<string, unknown>> =
   | {
       field: FieldName<T>;
+      path?: string[];
       op: "eq" | "ne";
       value: unknown;
     }
   | {
       field: FieldName<T>;
+      path?: string[];
       op: "gt" | "gte" | "lt" | "lte";
       value: unknown;
     }
   | {
       field: FieldName<T>;
+      path?: string[];
       op: "in" | "not_in";
       value: unknown[];
     }

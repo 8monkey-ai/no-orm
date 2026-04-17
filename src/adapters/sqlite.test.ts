@@ -143,7 +143,7 @@ describe("SqliteAdapter", () => {
     // 1. Exact match on nested string (theme = 'dark')
     const darkUsers = await adapter.findMany<User>({
       model: "users",
-      where: { field: "metadata->>theme", op: "eq", value: "dark" },
+      where: { field: "metadata", path: ["theme"], op: "eq", value: "dark" },
     });
     expect(darkUsers).toHaveLength(2);
     expect(darkUsers.map((u) => u.name)).toContain("User1");
@@ -152,7 +152,7 @@ describe("SqliteAdapter", () => {
     // 2. Numeric operator on deeply nested number (window.width > 900)
     const wideUsers = await adapter.findMany<User>({
       model: "users",
-      where: { field: "metadata->>window->>width", op: "gt", value: 900 },
+      where: { field: "metadata", path: ["window", "width"], op: "gt", value: 900 }
     });
     expect(wideUsers).toHaveLength(2);
     expect(wideUsers.map((u) => u.name)).toContain("User2");
@@ -161,7 +161,7 @@ describe("SqliteAdapter", () => {
     // 3. IN operator on nested string
     const specificUsers = await adapter.findMany<User>({
       model: "users",
-      where: { field: "metadata->>window->>width", op: "in", value: [800, 1024] },
+      where: { field: "metadata", path: ["window", "width"], op: "in", value: [800, 1024] }
     });
     expect(specificUsers).toHaveLength(2);
     expect(specificUsers.map((u) => u.name)).toContain("User1");

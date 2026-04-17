@@ -66,7 +66,7 @@ await adapter.migrate();
 // You can seamlessly query nested JSON!
 const darkUsers = await adapter.findMany({
   model: "conversations",
-  where: { field: "metadata->>theme", op: "eq", value: "dark" },
+  where: { field: "metadata", path: ["theme"], op: "eq", value: "dark" },
 });
 
 // Create a record

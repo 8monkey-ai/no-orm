@@ -159,7 +159,7 @@ export class SqliteAdapter implements Adapter {
   }): Promise<T | null> {
     const { model, where, select } = args;
     const query = this.buildSelect(model, select);
-    const { sql, params } = this.buildWhere(where);
+    const { sql, params } = this.buildWhere(model, where);
 
     const fullSql = `${query} WHERE ${sql} LIMIT 1`;
     const row = await this.db.get(fullSql, params);
@@ -184,7 +184,7 @@ export class SqliteAdapter implements Adapter {
     if (where !== undefined || cursor !== undefined) {
       // Determine cursor direction based on the first sort field, defaulting to asc
       const isAsc = !sortBy || !sortBy[0] || sortBy[0].direction !== "desc";
-      const { sql, params } = this.buildWhere(where, cursor, isAsc ? "asc" : "desc");
+      const { sql, params } = this.buildWhere(model, where, cursor, isAsc ? "asc" : "desc");
       sql_parts.push(`WHERE ${sql}`);
       for (let i = 0; i < params.length; i++) {
         const param = params[i];
@@ -223,7 +223,7 @@ export class SqliteAdapter implements Adapter {
     const fields = Object.keys(mappedData);
     const setClause = fields.map((f) => `${this.quote(f)} = ?`).join(", ");
 
-    const { sql: whereSql, params: whereParams } = this.buildWhere(where);
+    const { sql: whereSql, params: whereParams } = this.buildWhere(model, where);
 
     const params: SqliteValue[] = [];
     for (let i = 0; i < fields.length; i++) {
@@ -258,7 +258,7 @@ export class SqliteAdapter implements Adapter {
 
     let sql = `UPDATE ${this.quote(model)} SET ${setClause}`;
     if (where !== undefined) {
-      const { sql: whereSql, params: whereParams } = this.buildWhere(where);
+      const { sql: whereSql, params: whereParams } = this.buildWhere(model, where);
       sql += ` WHERE ${whereSql}`;
       for (let i = 0; i < whereParams.length; i++) {
         const param = whereParams[i];
@@ -275,7 +275,7 @@ export class SqliteAdapter implements Adapter {
     where: Where<T>;
   }): Promise<void> {
     const { model, where } = args;
-    const { sql, params } = this.buildWhere(where);
+    const { sql, params } = this.buildWhere(model, where);
     await this.db.run(`DELETE FROM ${this.quote(model)} WHERE ${sql}`, params);
   }
 
@@ -288,7 +288,7 @@ export class SqliteAdapter implements Adapter {
     const params: SqliteValue[] = [];
 
     if (where !== undefined) {
-      const { sql: whereSql, params: whereParams } = this.buildWhere(where);
+      const { sql: whereSql, params: whereParams } = this.buildWhere(model, where);
       sql += ` WHERE ${whereSql}`;
       for (let i = 0; i < whereParams.length; i++) {
         const param = whereParams[i];
@@ -309,7 +309,7 @@ export class SqliteAdapter implements Adapter {
     const params: SqliteValue[] = [];
 
     if (where !== undefined) {
-      const { sql: whereSql, params: whereParams } = this.buildWhere(where);
+      const { sql: whereSql, params: whereParams } = this.buildWhere(model, where);
       sql += ` WHERE ${whereSql}`;
       for (let i = 0; i < whereParams.length; i++) {
         const param = whereParams[i];
@@ -426,15 +426,16 @@ export class SqliteAdapter implements Adapter {
   }
 
   private buildWhere<T>(
+    modelName: string,
     where?: Where<T>,
     cursor?: Cursor<T>,
-    cursorDirection: "asc" | "desc" = "asc",
+    cursorDirection: "asc" | "desc" = "asc"
   ): { sql: string; params: SqliteValue[] } {
     const params: SqliteValue[] = [];
     const parts: string[] = [];
 
     if (where !== undefined) {
-      const result = this.buildWhereRecursive(where);
+      const result = this.buildWhereRecursive(modelName, where);
       parts.push(result.sql);
       for (let i = 0; i < result.params.length; i++) {
         const param = result.params[i];
@@ -470,9 +471,9 @@ export class SqliteAdapter implements Adapter {
     }
   }
 
-  private buildWhereRecursive<T>(where: Where<T>): { sql: string; params: SqliteValue[] } {
+  private buildWhereRecursive<T>(modelName: string, where: Where<T>): { sql: string; params: SqliteValue[] } {
     if ("and" in where) {
-      const parts = where.and.map((w) => this.buildWhereRecursive(w));
+      const parts = where.and.map((w) => this.buildWhereRecursive(modelName, w));
       const sql = `(${parts.map((p) => p.sql).join(" AND ")})`;
       const params: SqliteValue[] = [];
       for (let i = 0; i < parts.length; i++) {
@@ -483,7 +484,7 @@ export class SqliteAdapter implements Adapter {
     }
 
     if ("or" in where) {
-      const parts = where.or.map((w) => this.buildWhereRecursive(w));
+      const parts = where.or.map((w) => this.buildWhereRecursive(modelName, w));
       const sql = `(${parts.map((p) => p.sql).join(" OR ")})`;
       const params: SqliteValue[] = [];
       for (let i = 0; i < parts.length; i++) {
@@ -493,21 +494,23 @@ export class SqliteAdapter implements Adapter {
       return { sql, params };
     }
 
-    const leaf = where as { field: string; op: string; value: unknown };
-    const { field, op, value } = leaf;
+    const leaf = where as { field: string; path?: string[]; op: string; value: unknown };
+    const { field, path, op, value } = leaf;
 
     let quotedField: string;
-    if (field.includes("->>")) {
-      const parts = field.split("->>");
-      const topLevelColumn = parts[0];
-      if (topLevelColumn === undefined) throw new Error("Invalid JSON path");
+    if (path !== undefined && path.length > 0) {
+      const modelSpec = this.schema[modelName];
+      const fieldSpec = modelSpec?.fields[field];
+      if (fieldSpec?.type.type !== "json") {
+        throw new Error(`Cannot use 'path' filter on non-JSON field: ${field}`);
+      }
 
-      const jsonPath = `$.${parts.slice(1).join(".")}`;
-      quotedField = `json_extract(${this.quote(topLevelColumn)}, '${jsonPath}')`;
+      const jsonPath = `$.${path.join(".")}`;
+      const escapedPath = jsonPath.replaceAll("'", "''");
+      quotedField = `json_extract(${this.quote(field)}, '${escapedPath}')`;
     } else {
       quotedField = this.quote(field);
     }
-
     switch (op) {
       case "eq":
         return { sql: `${quotedField} = ?`, params: [this.mapWhereValue(value)] };
