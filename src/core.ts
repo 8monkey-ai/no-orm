@@ -152,6 +152,7 @@ export type Where<T = Record<string, unknown>> =
 
 export interface SortBy<T = Record<string, unknown>> {
   field: FieldName<T>;
+  path?: string[];
   direction?: "asc" | "desc";
 }
 

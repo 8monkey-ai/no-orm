@@ -182,9 +182,7 @@ export class SqliteAdapter implements Adapter {
     const sql_parts: string[] = [query];
 
     if (where !== undefined || cursor !== undefined) {
-      // Determine cursor direction based on the first sort field, defaulting to asc
-      const isAsc = !sortBy || !sortBy[0] || sortBy[0].direction !== "desc";
-      const { sql, params } = this.buildWhere(model, where, cursor, isAsc ? "asc" : "desc");
+      const { sql, params } = this.buildWhere(model, where, cursor, sortBy);
       sql_parts.push(`WHERE ${sql}`);
       for (let i = 0; i < params.length; i++) {
         const param = params[i];
@@ -194,7 +192,10 @@ export class SqliteAdapter implements Adapter {
 
     if (sortBy !== undefined) {
       const order = sortBy
-        .map((s) => `${this.quote(s.field)} ${s.direction?.toUpperCase() ?? "ASC"}`)
+        .map((s) => {
+          const col = this.buildColumnExpr(model, s.field as string, s.path);
+          return `${col} ${s.direction?.toUpperCase() ?? "ASC"}`;
+        })
         .join(", ");
       sql_parts.push(`ORDER BY ${order}`);
     }
@@ -329,9 +330,34 @@ export class SqliteAdapter implements Adapter {
     update: Partial<T>;
     select?: Select<T>;
   }): Promise<T> {
-    const { model, create, update, select } = args;
+    const { model, where, create, update, select } = args;
     const modelSpec = this.schema[model];
     if (modelSpec === undefined) throw new Error(`Model ${model} not found in schema`);
+
+    const extractConflictTargets = (w: Where<T>): string[] => {
+      if ("and" in w) {
+        const parts: string[] = [];
+        for (const sub of w.and) {
+          parts.push(...extractConflictTargets(sub));
+        }
+        return parts;
+      }
+      if ("or" in w) throw new Error("Upsert 'where' clause does not support 'or' operator.");
+
+      const leaf = w as { field: string; path?: string[]; op: string };
+      if (leaf.op !== "eq") throw new Error("Upsert 'where' clause only supports 'eq' operator.");
+
+      if (leaf.path && leaf.path.length > 0) {
+        throw new Error("Upsert operations by JSON path are currently unsupported.");
+      }
+
+      return [this.quote(leaf.field)];
+    };
+
+    const conflictTargets = extractConflictTargets(where);
+    if (conflictTargets.length === 0)
+      throw new Error("Upsert requires at least one conflict column in the 'where' clause.");
+    const conflictTargetSql = conflictTargets.join(", ");
 
     const mappedCreate = this.mapInput(model, create);
     const fields = Object.keys(mappedCreate);
@@ -342,9 +368,7 @@ export class SqliteAdapter implements Adapter {
     const updateFields = Object.keys(mappedUpdate);
     const updateClause = updateFields.map((f) => `${this.quote(f)} = ?`).join(", ");
 
-    const pkFields = modelSpec.primaryKey.fields.map((f) => this.quote(f)).join(", ");
-
-    const sql = `INSERT INTO ${this.quote(model)} (${columns}) VALUES (${placeholders}) ON CONFLICT(${pkFields}) DO UPDATE SET ${updateClause}`;
+    const sql = `INSERT INTO ${this.quote(model)} (${columns}) VALUES (${placeholders}) ON CONFLICT(${conflictTargetSql}) DO UPDATE SET ${updateClause}`;
 
     const params: SqliteValue[] = [];
     for (let i = 0; i < fields.length; i++) {
@@ -382,7 +406,7 @@ export class SqliteAdapter implements Adapter {
   }
 
   async transaction<T>(fn: (tx: Adapter) => Promise<T>): Promise<T> {
-    const sp = `sp_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+    const sp = this.quote(`sp_${Date.now()}_${Math.floor(Math.random() * 100000)}`);
 
     await this.db.run(`SAVEPOINT ${sp}`, []);
     try {
@@ -394,7 +418,6 @@ export class SqliteAdapter implements Adapter {
       throw error;
     }
   }
-
   // --- Helpers ---
 
   private quote(name: string): string {
@@ -425,11 +448,83 @@ export class SqliteAdapter implements Adapter {
     return `SELECT * FROM ${this.quote(model)}`;
   }
 
+  private buildColumnExpr(modelName: string, field: string, path?: string[]): string {
+    if (path !== undefined && path.length > 0) {
+      const modelSpec = this.schema[modelName];
+      const fieldSpec = modelSpec?.fields[field];
+      if (fieldSpec?.type.type !== "json") {
+        throw new Error(`Cannot use 'path' filter on non-JSON field: ${field}`);
+      }
+
+      const jsonPath = `$.${path.join(".")}`;
+      const escapedPath = jsonPath.replaceAll("'", "''");
+      return `json_extract(${this.quote(field)}, '${escapedPath}')`;
+    }
+    return this.quote(field);
+  }
+
+  private buildCursor<T>(
+    modelName: string,
+    cursor: Cursor<T>,
+    sortBy?: SortBy<T>[],
+  ): { sql: string; params: SqliteValue[] } {
+    const entries = Object.entries(cursor.after);
+    if (entries.length === 0) return { sql: "", params: [] };
+
+    const sortCriteria: SortBy<T>[] =
+      sortBy && sortBy.length > 0
+        ? sortBy
+        : entries.map(([field]) => {
+            if (!isValidField<T>(field)) throw new Error("Invalid cursor field");
+            return { field, direction: "asc" };
+          });
+
+    const validSorts = sortCriteria.filter((s) => {
+      return cursor.after[s.field] !== undefined;
+    });
+
+    const orParts: string[] = [];
+    const cursorParams: SqliteValue[] = [];
+
+    for (let i = 0; i < validSorts.length; i++) {
+      const currentSort = validSorts[i];
+      if (!currentSort) continue;
+
+      const andParts: string[] = [];
+
+      for (let j = 0; j < i; j++) {
+        const prevSort = validSorts[j];
+        if (!prevSort) continue;
+        const colExpr = this.buildColumnExpr(modelName, prevSort.field as string, prevSort.path);
+        andParts.push(`${colExpr} = ?`);
+        cursorParams.push(this.mapWhereValue(cursor.after[prevSort.field]));
+      }
+
+      const op = currentSort.direction === "desc" ? "<" : ">";
+      const colExpr = this.buildColumnExpr(
+        modelName,
+        currentSort.field as string,
+        currentSort.path,
+      );
+      andParts.push(`${colExpr} ${op} ?`);
+      cursorParams.push(this.mapWhereValue(cursor.after[currentSort.field]));
+
+      orParts.push(`(${andParts.join(" AND ")})`);
+    }
+
+    if (orParts.length === 0) return { sql: "", params: [] };
+
+    return {
+      sql: `(${orParts.join(" OR ")})`,
+      params: cursorParams,
+    };
+  }
+
   private buildWhere<T>(
     modelName: string,
     where?: Where<T>,
     cursor?: Cursor<T>,
-    cursorDirection: "asc" | "desc" = "asc"
+    sortBy?: SortBy<T>[],
   ): { sql: string; params: SqliteValue[] } {
     const params: SqliteValue[] = [];
     const parts: string[] = [];
@@ -437,31 +532,20 @@ export class SqliteAdapter implements Adapter {
     if (where !== undefined) {
       const result = this.buildWhereRecursive(modelName, where);
       parts.push(result.sql);
-      for (let i = 0; i < result.params.length; i++) {
-        const param = result.params[i];
-        if (param !== undefined) params.push(param);
-      }
+      this.appendParams(params, result.params);
     }
 
     if (cursor !== undefined) {
-      const entries = Object.entries(cursor.after);
-      if (entries.length > 0) {
-        const cursorParts: string[] = [];
-        const operator = cursorDirection === "asc" ? ">" : "<";
-        for (const [field, value] of entries) {
-          cursorParts.push(`${this.quote(field)} ${operator} ?`);
-          params.push(this.mapWhereValue(value));
-        }
-        parts.push(`(${cursorParts.join(" AND ")})`);
+      const cursorResult = this.buildCursor(modelName, cursor, sortBy);
+      if (cursorResult.sql !== "") {
+        parts.push(cursorResult.sql);
+        this.appendParams(params, cursorResult.params);
       }
     }
 
     const sql = parts.length > 1 ? parts.map((p) => `(${p})`).join(" AND ") : (parts[0] ?? "1=1");
 
-    return {
-      sql,
-      params,
-    };
+    return { sql, params };
   }
 
   private appendParams(target: SqliteValue[], source: SqliteValue[]): void {
@@ -471,7 +555,10 @@ export class SqliteAdapter implements Adapter {
     }
   }
 
-  private buildWhereRecursive<T>(modelName: string, where: Where<T>): { sql: string; params: SqliteValue[] } {
+  private buildWhereRecursive<T>(
+    modelName: string,
+    where: Where<T>,
+  ): { sql: string; params: SqliteValue[] } {
     if ("and" in where) {
       const parts = where.and.map((w) => this.buildWhereRecursive(modelName, w));
       const sql = `(${parts.map((p) => p.sql).join(" AND ")})`;
@@ -497,20 +584,8 @@ export class SqliteAdapter implements Adapter {
     const leaf = where as { field: string; path?: string[]; op: string; value: unknown };
     const { field, path, op, value } = leaf;
 
-    let quotedField: string;
-    if (path !== undefined && path.length > 0) {
-      const modelSpec = this.schema[modelName];
-      const fieldSpec = modelSpec?.fields[field];
-      if (fieldSpec?.type.type !== "json") {
-        throw new Error(`Cannot use 'path' filter on non-JSON field: ${field}`);
-      }
+    const quotedField = this.buildColumnExpr(modelName, field, path);
 
-      const jsonPath = `$.${path.join(".")}`;
-      const escapedPath = jsonPath.replaceAll("'", "''");
-      quotedField = `json_extract(${this.quote(field)}, '${escapedPath}')`;
-    } else {
-      quotedField = this.quote(field);
-    }
     switch (op) {
       case "eq":
         return { sql: `${quotedField} = ?`, params: [this.mapWhereValue(value)] };

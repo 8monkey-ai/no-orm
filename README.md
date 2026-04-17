@@ -94,3 +94,9 @@ const results = await adapter.findMany({
 ## License
 
 MIT
+
+### Limitations
+
+- **Upserts on JSON paths:** Upsert operations require the conflict target to be explicitly identifiable by the database engine (like a `UNIQUE` index or `PRIMARY KEY`). Because `no-orm` focuses on minimal schema bootstrapping and doesn't enforce `UNIQUE` expression indexes natively in v1, upsert operations containing `path` arguments in the `where` clause will throw an error to prevent silent data corruption.
+
+- **Concurrent Transactions:** `no-orm` does not manage connection pools or implement JavaScript mutexes. If you share a single database connection globally (e.g., a single `bun:sqlite` instance) across concurrent web requests, their `adapter.transaction()` calls will interleave on the same connection, causing unpredictable rollbacks. For concurrent transactions, you must instantiate a new `Adapter` per request using a dedicated connection from a pool.

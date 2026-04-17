@@ -152,7 +152,7 @@ describe("SqliteAdapter", () => {
     // 2. Numeric operator on deeply nested number (window.width > 900)
     const wideUsers = await adapter.findMany<User>({
       model: "users",
-      where: { field: "metadata", path: ["window", "width"], op: "gt", value: 900 }
+      where: { field: "metadata", path: ["window", "width"], op: "gt", value: 900 },
     });
     expect(wideUsers).toHaveLength(2);
     expect(wideUsers.map((u) => u.name)).toContain("User2");
@@ -161,7 +161,7 @@ describe("SqliteAdapter", () => {
     // 3. IN operator on nested string
     const specificUsers = await adapter.findMany<User>({
       model: "users",
-      where: { field: "metadata", path: ["window", "width"], op: "in", value: [800, 1024] }
+      where: { field: "metadata", path: ["window", "width"], op: "in", value: [800, 1024] },
     });
     expect(specificUsers).toHaveLength(2);
     expect(specificUsers.map((u) => u.name)).toContain("User1");
@@ -356,7 +356,7 @@ describe("SqliteAdapter", () => {
         where: { field: "id", op: "eq", value: "n2" },
       });
 
-      expect(outer1?.name).toBe("Outer1"); // Reverted the update from inner tx
+      expect(outer1?.name).toBe("Outer1"); // Inner tx rolled back; update to n1 was never applied
       expect(outer2).not.toBeNull();
 
       // Inner operations should rollback (n3 does not exist)
@@ -369,6 +369,54 @@ describe("SqliteAdapter", () => {
   });
 
   describe("Pagination", () => {
+    it("should handle multi-field keyset pagination correctly", async () => {
+      // Seed data specifically for multi-field sort
+      await adapter.create({
+        model: "users",
+        data: { id: "m1", name: "A", age: 30, is_active: true, metadata: null },
+      });
+      await adapter.create({
+        model: "users",
+        data: { id: "m2", name: "B", age: 30, is_active: true, metadata: null },
+      });
+      await adapter.create({
+        model: "users",
+        data: { id: "m3", name: "C", age: 30, is_active: true, metadata: null },
+      });
+      await adapter.create({
+        model: "users",
+        data: { id: "m4", name: "A", age: 31, is_active: true, metadata: null },
+      });
+      await adapter.create({
+        model: "users",
+        data: { id: "m5", name: "B", age: 31, is_active: true, metadata: null },
+      });
+
+      const result = await adapter.findMany<User>({
+        model: "users",
+        sortBy: [
+          { field: "age", direction: "asc" },
+          { field: "name", direction: "desc" },
+        ],
+        cursor: {
+          after: { age: 30, name: "B" }, // Cursor points to m2
+        },
+        limit: 3,
+      });
+
+      // Sorted order:
+      // 1. age: 30, name: "C" (m3) -> skipped (before cursor)
+      // 2. age: 30, name: "B" (m2) -> cursor
+      // 3. age: 30, name: "A" (m1) -> match 1
+      // 4. age: 31, name: "B" (m5) -> match 2
+      // 5. age: 31, name: "A" (m4) -> match 3
+
+      expect(result).toHaveLength(3);
+      expect(result[0]?.id).toBe("m1"); // age 30, name A (asc 30 == 30, desc A < B)
+      expect(result[1]?.id).toBe("m5"); // age 31, name B (asc 31 > 30)
+      expect(result[2]?.id).toBe("m4"); // age 31, name A
+    });
+
     beforeEach(async () => {
       // Seed data for pagination
       const creations = [];
