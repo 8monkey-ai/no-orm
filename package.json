@@ -4,14 +4,14 @@
   "description": "A tiny, composable ORM core for TS libraries - no heavy abstractions, just the primitives.",
   "keywords": [
     "database",
-    "schema",
-    "migration",
-    "orm",
+    "greptime",
     "library",
-    "postgresql",
+    "migration",
     "mysql",
-    "sqlite",
-    "greptime"
+    "orm",
+    "postgresql",
+    "schema",
+    "sqlite"
   ],
   "homepage": "https://hebo.ai",
   "bugs": {
@@ -49,6 +49,7 @@
   },
   "dependencies": {},
   "devDependencies": {
+    "@types/bun": "^1.3.12",
     "oxfmt": "^0.44.0",
     "oxlint": "^1.59.0",
     "oxlint-tsgolint": "^0.20.0",
