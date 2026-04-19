@@ -1,34 +1,30 @@
-import type { Adapter, Cursor, FieldName, Schema, Select, SortBy, Where } from "../core";
+import { AsyncLocalStorage } from "node:async_hooks";
+import type {
+  Adapter,
+  Cursor,
+  FieldName,
+  Schema,
+  Select,
+  SortBy,
+  Where,
+  WhereWithoutPath,
+} from "../types";
+import { isModelType, isRecord, isStringKey, isValidField } from "../utils/is";
+import { escapeLiteral, quote } from "../utils/sql";
+import type {
+  NativeSqliteDriver,
+  SqliteDatabase,
+  SqliteValue,
+} from "./sqlite.types";
 
-export type SqliteValue = string | number | bigint | Uint8Array | null;
+const transactionStorage = new AsyncLocalStorage<SqliteDatabase>();
 
-/**
- * The standard connection interface the Adapter expects.
- */
-export interface SqliteDatabase {
-  run(sql: string, params: SqliteValue[]): Promise<{ changes: number }>;
-  get(sql: string, params: SqliteValue[]): Promise<Record<string, unknown> | null>;
-  all(sql: string, params: SqliteValue[]): Promise<Record<string, unknown>[]>;
-}
-
-/**
- * Represents a raw native SQLite driver (like Bun or better-sqlite3).
- */
-export interface NativeSqliteStatement {
-  run(...params: SqliteValue[]): unknown;
-  get(...params: SqliteValue[]): unknown;
-  all(...params: SqliteValue[]): unknown;
-}
-
-export interface NativeSqliteDriver {
-  prepare(sql: string): NativeSqliteStatement;
-}
-
-export class SqliteAdapter implements Adapter {
+export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
   private db: SqliteDatabase;
+  private spCounter = 0;
 
   constructor(
-    private schema: Schema,
+    private schema: S,
     database: SqliteDatabase | NativeSqliteDriver,
   ) {
     if ("prepare" in database) {
@@ -36,6 +32,10 @@ export class SqliteAdapter implements Adapter {
     } else {
       this.db = database;
     }
+  }
+
+  private get activeDb(): SqliteDatabase {
+    return transactionStorage.getStore() ?? this.db;
   }
 
   private wrapNativeDriver(native: NativeSqliteDriver): SqliteDatabase {
@@ -63,18 +63,20 @@ export class SqliteAdapter implements Adapter {
   async migrate(): Promise<void> {
     for (const [name, model] of Object.entries(this.schema)) {
       const columns = Object.entries(model.fields).map(([fieldName, field]) => {
-        const type = this.mapType(field.type.type);
+        const type = this.mapType(field.type);
         const nullable = field.nullable === true ? "" : " NOT NULL";
-        return `${this.quote(fieldName)} ${type}${nullable}`;
+        return `${quote(fieldName)} ${type}${nullable}`;
       });
 
-      const pk = `PRIMARY KEY (${model.primaryKey.fields.map((f) => this.quote(f)).join(", ")})`;
+      const pkFields = Array.isArray(model.primaryKey)
+        ? model.primaryKey
+        : [model.primaryKey];
+      const pk = `PRIMARY KEY (${pkFields.map((f) => quote(f)).join(", ")})`;
 
       // Migrations (CREATE TABLE / CREATE INDEX) must be executed sequentially
       // to prevent database locking errors and ensure dependent objects exist.
-      // eslint-disable-next-line no-await-in-loop
-      await this.db.run(
-        `CREATE TABLE IF NOT EXISTS ${this.quote(name)} (${columns.join(", ")}, ${pk})`,
+      await this.activeDb.run(
+        `CREATE TABLE IF NOT EXISTS ${quote(name)} (${columns.join(", ")}, ${pk})`,
         [],
       );
 
@@ -82,15 +84,13 @@ export class SqliteAdapter implements Adapter {
         for (let i = 0; i < model.indexes.length; i++) {
           const index = model.indexes[i];
           if (index === undefined) continue;
-          const fields = index.fields
-            .map((f) => `${this.quote(f.field)}${f.order ? ` ${f.order.toUpperCase()}` : ""}`)
+          const fields = Array.isArray(index.field) ? index.field : [index.field];
+          const fieldList = fields
+            .map((f) => `${quote(f)}${index.order ? ` ${index.order.toUpperCase()}` : ""}`)
             .join(", ");
           const indexName = `idx_${name}_${i}`;
-          // Migrations (CREATE TABLE / CREATE INDEX) must be executed sequentially
-          // to prevent database locking errors and ensure dependent objects exist.
-          // eslint-disable-next-line no-await-in-loop
-          await this.db.run(
-            `CREATE INDEX IF NOT EXISTS ${this.quote(indexName)} ON ${this.quote(name)} (${fields})`,
+          await this.activeDb.run(
+            `CREATE INDEX IF NOT EXISTS ${quote(indexName)} ON ${quote(name)} (${fieldList})`,
             [],
           );
         }
@@ -98,8 +98,8 @@ export class SqliteAdapter implements Adapter {
     }
   }
 
-  async create<T extends Record<string, unknown> = Record<string, unknown>>(args: {
-    model: string;
+  async create<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+    model: K;
     data: T;
     select?: Select<T>;
   }): Promise<T> {
@@ -108,7 +108,7 @@ export class SqliteAdapter implements Adapter {
     const fields = Object.keys(mappedData);
 
     const placeholders = Array.from({ length: fields.length }).fill("?").join(", ");
-    const columns = fields.map((f) => this.quote(f)).join(", ");
+    const columns = fields.map((f) => quote(f)).join(", ");
 
     const params: SqliteValue[] = [];
     for (let i = 0; i < fields.length; i++) {
@@ -116,44 +116,42 @@ export class SqliteAdapter implements Adapter {
       if (isStringKey(field)) params.push(mappedData[field] ?? null);
     }
 
-    await this.db.run(
-      `INSERT INTO ${this.quote(model)} (${columns}) VALUES (${placeholders})`,
+    await this.activeDb.run(
+      `INSERT INTO ${quote(model)} (${columns}) VALUES (${placeholders})`,
       params,
     );
 
-    if (select !== undefined) {
-      const modelSpec = this.schema[model];
-      if (modelSpec === undefined) throw new Error(`Model ${model} not found in schema`);
+    const modelSpec = this.schema[model];
+    if (modelSpec === undefined) throw new Error(`Model ${model} not found in schema`);
 
-      const pkFields = modelSpec.primaryKey.fields;
-      const where: Where<T>[] = [];
+    const pkFields = Array.isArray(modelSpec.primaryKey)
+      ? modelSpec.primaryKey
+      : [modelSpec.primaryKey];
 
-      for (let i = 0; i < pkFields.length; i++) {
-        const f = pkFields[i];
-        if (isValidField<T>(f)) {
-          where.push({
-            field: f,
-            op: "eq",
-            value: data[f],
-          });
-        }
+    const where: Where<T>[] = [];
+    for (let i = 0; i < pkFields.length; i++) {
+      const f = pkFields[i];
+      if (isValidField<T>(f)) {
+        where.push({
+          field: f,
+          op: "eq",
+          value: (data as any)[f],
+        });
       }
-
-      const result = await this.find<T>({
-        model,
-        where: where.length === 1 && where[0] ? where[0] : { and: where },
-        select,
-      });
-
-      if (result === null) throw new Error("Failed to refetch created record");
-      return result;
     }
 
-    return data;
+    const result = await this.find<K, T>({
+      model,
+      where: where.length === 1 && where[0] ? where[0] : { and: where },
+      select,
+    });
+
+    if (result === null) throw new Error("Failed to refetch created record");
+    return result;
   }
 
-  async find<T extends Record<string, unknown> = Record<string, unknown>>(args: {
-    model: string;
+  async find<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+    model: K;
     where: Where<T>;
     select?: Select<T>;
   }): Promise<T | null> {
@@ -162,13 +160,13 @@ export class SqliteAdapter implements Adapter {
     const { sql, params } = this.buildWhere(model, where);
 
     const fullSql = `${query} WHERE ${sql} LIMIT 1`;
-    const row = await this.db.get(fullSql, params);
+    const row = await this.activeDb.get(fullSql, params);
 
     return row ? this.mapRow<T>(model, row) : null;
   }
 
-  async findMany<T extends Record<string, unknown> = Record<string, unknown>>(args: {
-    model: string;
+  async findMany<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+    model: K;
     where?: Where<T>;
     select?: Select<T>;
     sortBy?: SortBy<T>[];
@@ -210,20 +208,21 @@ export class SqliteAdapter implements Adapter {
       args_sql.push(offset);
     }
 
-    const rows = await this.db.all(sql_parts.join(" "), args_sql);
+    const rows = await this.activeDb.all(sql_parts.join(" "), args_sql);
     return rows.map((row) => this.mapRow<T>(model, row));
   }
 
-  async update<T extends Record<string, unknown> = Record<string, unknown>>(args: {
-    model: string;
+  async update<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+    model: K;
     where: Where<T>;
     data: Partial<T>;
   }): Promise<T | null> {
     const { model, where, data } = args;
     const mappedData = this.mapInput(model, data);
     const fields = Object.keys(mappedData);
-    const setClause = fields.map((f) => `${this.quote(f)} = ?`).join(", ");
+    if (fields.length === 0) return this.find({ model, where });
 
+    const setClause = fields.map((f) => `${quote(f)} = ?`).join(", ");
     const { sql: whereSql, params: whereParams } = this.buildWhere(model, where);
 
     const params: SqliteValue[] = [];
@@ -236,28 +235,49 @@ export class SqliteAdapter implements Adapter {
       if (param !== undefined) params.push(param);
     }
 
-    await this.db.run(`UPDATE ${this.quote(model)} SET ${setClause} WHERE ${whereSql}`, params);
+    await this.activeDb.run(`UPDATE ${quote(model)} SET ${setClause} WHERE ${whereSql}`, params);
 
-    return this.find({ model, where });
+    const modelSpec = this.schema[model];
+    if (modelSpec === undefined) throw new Error(`Model ${model} not found in schema`);
+
+    const pkFields = Array.isArray(modelSpec.primaryKey)
+      ? modelSpec.primaryKey
+      : [modelSpec.primaryKey];
+
+    const preRead = await this.find<K, T>({ model, where });
+    if (!preRead) return null;
+
+    const pkWhere: Where<T>[] = [];
+    for (const f of pkFields) {
+      if (isValidField<T>(f)) {
+        pkWhere.push({ field: f, op: "eq", value: (preRead as any)[f] });
+      }
+    }
+
+    return this.find<K, T>({
+      model,
+      where: pkWhere.length === 1 && pkWhere[0] ? pkWhere[0] : { and: pkWhere },
+    });
   }
 
-  async updateMany<T extends Record<string, unknown> = Record<string, unknown>>(args: {
-    model: string;
+  async updateMany<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+    model: K;
     where?: Where<T>;
     data: Partial<T>;
   }): Promise<number> {
     const { model, where, data } = args;
     const mappedData = this.mapInput(model, data);
     const fields = Object.keys(mappedData);
-    const setClause = fields.map((f) => `${this.quote(f)} = ?`).join(", ");
+    if (fields.length === 0) return 0;
 
+    const setClause = fields.map((f) => `${quote(f)} = ?`).join(", ");
     const args_sql: SqliteValue[] = [];
     for (let i = 0; i < fields.length; i++) {
       const field = fields[i];
       if (isStringKey(field)) args_sql.push(mappedData[field] ?? null);
     }
 
-    let sql = `UPDATE ${this.quote(model)} SET ${setClause}`;
+    let sql = `UPDATE ${quote(model)} SET ${setClause}`;
     if (where !== undefined) {
       const { sql: whereSql, params: whereParams } = this.buildWhere(model, where);
       sql += ` WHERE ${whereSql}`;
@@ -267,25 +287,25 @@ export class SqliteAdapter implements Adapter {
       }
     }
 
-    const result = await this.db.run(sql, args_sql);
+    const result = await this.activeDb.run(sql, args_sql);
     return result.changes;
   }
 
-  async delete<T extends Record<string, unknown> = Record<string, unknown>>(args: {
-    model: string;
+  async delete<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+    model: K;
     where: Where<T>;
   }): Promise<void> {
     const { model, where } = args;
     const { sql, params } = this.buildWhere(model, where);
-    await this.db.run(`DELETE FROM ${this.quote(model)} WHERE ${sql}`, params);
+    await this.activeDb.run(`DELETE FROM ${quote(model)} WHERE ${sql}`, params);
   }
 
-  async deleteMany<T extends Record<string, unknown> = Record<string, unknown>>(args: {
-    model: string;
+  async deleteMany<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+    model: K;
     where?: Where<T>;
   }): Promise<number> {
     const { model, where } = args;
-    let sql = `DELETE FROM ${this.quote(model)}`;
+    let sql = `DELETE FROM ${quote(model)}`;
     const params: SqliteValue[] = [];
 
     if (where !== undefined) {
@@ -297,16 +317,16 @@ export class SqliteAdapter implements Adapter {
       }
     }
 
-    const result = await this.db.run(sql, params);
+    const result = await this.activeDb.run(sql, params);
     return result.changes;
   }
 
-  async count<T extends Record<string, unknown> = Record<string, unknown>>(args: {
-    model: string;
+  async count<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+    model: K;
     where?: Where<T>;
   }): Promise<number> {
     const { model, where } = args;
-    let sql = `SELECT COUNT(*) as count FROM ${this.quote(model)}`;
+    let sql = `SELECT COUNT(*) as count FROM ${quote(model)}`;
     const params: SqliteValue[] = [];
 
     if (where !== undefined) {
@@ -318,14 +338,14 @@ export class SqliteAdapter implements Adapter {
       }
     }
 
-    const result = await this.db.get(sql, params);
+    const result = await this.activeDb.get(sql, params);
     const countVal = result?.["count"];
     return typeof countVal === "number" ? countVal : 0;
   }
 
-  async upsert<T extends Record<string, unknown> = Record<string, unknown>>(args: {
-    model: string;
-    where: Where<T>;
+  async upsert<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+    model: K;
+    where: WhereWithoutPath<T>;
     create: T;
     update: Partial<T>;
     select?: Select<T>;
@@ -336,22 +356,13 @@ export class SqliteAdapter implements Adapter {
 
     const extractConflictTargets = (w: Where<T>): string[] => {
       if ("and" in w) {
-        const parts: string[] = [];
-        for (const sub of w.and) {
-          parts.push(...extractConflictTargets(sub));
-        }
-        return parts;
+        return w.and.flatMap((sub) => extractConflictTargets(sub));
       }
       if ("or" in w) throw new Error("Upsert 'where' clause does not support 'or' operator.");
 
-      const leaf = w as { field: string; path?: string[]; op: string };
+      const leaf = w as { field: string; op: string };
       if (leaf.op !== "eq") throw new Error("Upsert 'where' clause only supports 'eq' operator.");
-
-      if (leaf.path && leaf.path.length > 0) {
-        throw new Error("Upsert operations by JSON path are currently unsupported.");
-      }
-
-      return [this.quote(leaf.field)];
+      return [quote(leaf.field)];
     };
 
     const conflictTargets = extractConflictTargets(where);
@@ -361,43 +372,35 @@ export class SqliteAdapter implements Adapter {
 
     const mappedCreate = this.mapInput(model, create);
     const fields = Object.keys(mappedCreate);
-    const columns = fields.map((f) => this.quote(f)).join(", ");
+    const columns = fields.map((f) => quote(f)).join(", ");
     const placeholders = fields.map(() => "?").join(", ");
 
     const mappedUpdate = this.mapInput(model, update);
     const updateFields = Object.keys(mappedUpdate);
-    const updateClause = updateFields.map((f) => `${this.quote(f)} = ?`).join(", ");
+    const updateClause = updateFields.map((f) => `${quote(f)} = ?`).join(", ");
 
-    const sql = `INSERT INTO ${this.quote(model)} (${columns}) VALUES (${placeholders}) ON CONFLICT(${conflictTargetSql}) DO UPDATE SET ${updateClause}`;
+    const sql = `INSERT INTO ${quote(model)} (${columns}) VALUES (${placeholders}) ON CONFLICT(${conflictTargetSql}) DO UPDATE SET ${updateClause}`;
 
     const params: SqliteValue[] = [];
-    for (let i = 0; i < fields.length; i++) {
-      const field = fields[i];
-      if (isStringKey(field)) params.push(mappedCreate[field] ?? null);
-    }
-    for (let i = 0; i < updateFields.length; i++) {
-      const field = updateFields[i];
-      if (isStringKey(field)) params.push(mappedUpdate[field] ?? null);
-    }
+    for (const f of fields) params.push(mappedCreate[f] ?? null);
+    for (const f of updateFields) params.push(mappedUpdate[f] ?? null);
 
-    await this.db.run(sql, params);
+    await this.activeDb.run(sql, params);
 
-    const pkValuesWhere: Where<T>[] = [];
-    for (let i = 0; i < modelSpec.primaryKey.fields.length; i++) {
-      const f = modelSpec.primaryKey.fields[i];
+    const pkFields = Array.isArray(modelSpec.primaryKey)
+      ? modelSpec.primaryKey
+      : [modelSpec.primaryKey];
+
+    const pkWhere: Where<T>[] = [];
+    for (const f of pkFields) {
       if (isValidField<T>(f)) {
-        pkValuesWhere.push({
-          field: f,
-          op: "eq",
-          value: create[f],
-        });
+        pkWhere.push({ field: f, op: "eq", value: (create as any)[f] });
       }
     }
 
-    const result = await this.find<T>({
+    const result = await this.find<K, T>({
       model,
-      where:
-        pkValuesWhere.length === 1 && pkValuesWhere[0] ? pkValuesWhere[0] : { and: pkValuesWhere },
+      where: pkWhere.length === 1 && pkWhere[0] ? pkWhere[0] : { and: pkWhere },
       select,
     });
 
@@ -405,23 +408,18 @@ export class SqliteAdapter implements Adapter {
     return result;
   }
 
-  async transaction<T>(fn: (tx: Adapter) => Promise<T>): Promise<T> {
-    const sp = this.quote(`sp_${Date.now()}_${Math.floor(Math.random() * 100000)}`);
+  async transaction<T>(fn: (tx: Adapter<S>) => Promise<T>): Promise<T> {
+    const sp = quote(`sp_${this.spCounter++}`);
 
-    await this.db.run(`SAVEPOINT ${sp}`, []);
+    await this.activeDb.run(`SAVEPOINT ${sp}`, []);
     try {
-      const result = await fn(this);
-      await this.db.run(`RELEASE SAVEPOINT ${sp}`, []);
+      const result = await transactionStorage.run(this.activeDb, () => fn(this));
+      await this.activeDb.run(`RELEASE SAVEPOINT ${sp}`, []);
       return result;
     } catch (error) {
-      await this.db.run(`ROLLBACK TO SAVEPOINT ${sp}`, []);
+      await this.activeDb.run(`ROLLBACK TO SAVEPOINT ${sp}`, []);
       throw error;
     }
-  }
-  // --- Helpers ---
-
-  private quote(name: string): string {
-    return `"${name}"`;
   }
 
   private mapType(type: string): string {
@@ -431,11 +429,11 @@ export class SqliteAdapter implements Adapter {
       case "number":
         return "REAL";
       case "boolean":
-        return "INTEGER"; // SQLite stores booleans as 0 or 1
       case "timestamp":
-        return "INTEGER"; // BIGINT/INTEGER for ms since epoch
+        return "INTEGER";
       case "json":
-        return "TEXT"; // Stored as string
+      case "json[]":
+        return "TEXT";
       default:
         return "TEXT";
     }
@@ -443,24 +441,23 @@ export class SqliteAdapter implements Adapter {
 
   private buildSelect<T>(model: string, select?: Select<T>): string {
     if (select !== undefined) {
-      return `SELECT ${select.map((f) => this.quote(f)).join(", ")} FROM ${this.quote(model)}`;
+      return `SELECT ${select.map((f) => quote(f as string)).join(", ")} FROM ${quote(model)}`;
     }
-    return `SELECT * FROM ${this.quote(model)}`;
+    return `SELECT * FROM ${quote(model)}`;
   }
 
   private buildColumnExpr(modelName: string, field: string, path?: string[]): string {
     if (path !== undefined && path.length > 0) {
-      const modelSpec = this.schema[modelName];
+      const modelSpec = (this.schema as any)[modelName];
       const fieldSpec = modelSpec?.fields[field];
-      if (fieldSpec?.type.type !== "json") {
+      if (fieldSpec?.type !== "json" && fieldSpec?.type !== "json[]") {
         throw new Error(`Cannot use 'path' filter on non-JSON field: ${field}`);
       }
 
       const jsonPath = `$.${path.join(".")}`;
-      const escapedPath = jsonPath.replaceAll("'", "''");
-      return `json_extract(${this.quote(field)}, '${escapedPath}')`;
+      return `json_extract(${quote(field)}, '${escapeLiteral(jsonPath)}')`;
     }
-    return this.quote(field);
+    return quote(field);
   }
 
   private buildCursor<T>(
@@ -479,22 +476,16 @@ export class SqliteAdapter implements Adapter {
             return { field, direction: "asc" };
           });
 
-    const validSorts = sortCriteria.filter((s) => {
-      return cursor.after[s.field] !== undefined;
-    });
-
+    const validSorts = sortCriteria.filter((s) => cursor.after[s.field] !== undefined);
     const orParts: string[] = [];
     const cursorParams: SqliteValue[] = [];
 
     for (let i = 0; i < validSorts.length; i++) {
-      const currentSort = validSorts[i];
-      if (!currentSort) continue;
-
+      const currentSort = validSorts[i]!;
       const andParts: string[] = [];
 
       for (let j = 0; j < i; j++) {
-        const prevSort = validSorts[j];
-        if (!prevSort) continue;
+        const prevSort = validSorts[j]!;
         const colExpr = this.buildColumnExpr(modelName, prevSort.field as string, prevSort.path);
         andParts.push(`${colExpr} = ?`);
         cursorParams.push(this.mapWhereValue(cursor.after[prevSort.field]));
@@ -512,10 +503,8 @@ export class SqliteAdapter implements Adapter {
       orParts.push(`(${andParts.join(" AND ")})`);
     }
 
-    if (orParts.length === 0) return { sql: "", params: [] };
-
     return {
-      sql: `(${orParts.join(" OR ")})`,
+      sql: orParts.length > 0 ? `(${orParts.join(" OR ")})` : "",
       params: cursorParams,
     };
   }
@@ -532,27 +521,19 @@ export class SqliteAdapter implements Adapter {
     if (where !== undefined) {
       const result = this.buildWhereRecursive(modelName, where);
       parts.push(result.sql);
-      this.appendParams(params, result.params);
+      params.push(...result.params);
     }
 
     if (cursor !== undefined) {
       const cursorResult = this.buildCursor(modelName, cursor, sortBy);
       if (cursorResult.sql !== "") {
         parts.push(cursorResult.sql);
-        this.appendParams(params, cursorResult.params);
+        params.push(...cursorResult.params);
       }
     }
 
     const sql = parts.length > 1 ? parts.map((p) => `(${p})`).join(" AND ") : (parts[0] ?? "1=1");
-
     return { sql, params };
-  }
-
-  private appendParams(target: SqliteValue[], source: SqliteValue[]): void {
-    for (let j = 0; j < source.length; j++) {
-      const param = source[j];
-      if (param !== undefined) target.push(param);
-    }
   }
 
   private buildWhereRecursive<T>(
@@ -561,29 +542,22 @@ export class SqliteAdapter implements Adapter {
   ): { sql: string; params: SqliteValue[] } {
     if ("and" in where) {
       const parts = where.and.map((w) => this.buildWhereRecursive(modelName, w));
-      const sql = `(${parts.map((p) => p.sql).join(" AND ")})`;
-      const params: SqliteValue[] = [];
-      for (let i = 0; i < parts.length; i++) {
-        const part = parts[i];
-        if (part) this.appendParams(params, part.params);
-      }
-      return { sql, params };
+      return {
+        sql: `(${parts.map((p) => p.sql).join(" AND ")})`,
+        params: parts.flatMap((p) => p.params),
+      };
     }
 
     if ("or" in where) {
       const parts = where.or.map((w) => this.buildWhereRecursive(modelName, w));
-      const sql = `(${parts.map((p) => p.sql).join(" OR ")})`;
-      const params: SqliteValue[] = [];
-      for (let i = 0; i < parts.length; i++) {
-        const part = parts[i];
-        if (part) this.appendParams(params, part.params);
-      }
-      return { sql, params };
+      return {
+        sql: `(${parts.map((p) => p.sql).join(" OR ")})`,
+        params: parts.flatMap((p) => p.params),
+      };
     }
 
     const leaf = where as { field: string; path?: string[]; op: string; value: unknown };
     const { field, path, op, value } = leaf;
-
     const quotedField = this.buildColumnExpr(modelName, field, path);
 
     switch (op) {
@@ -601,24 +575,18 @@ export class SqliteAdapter implements Adapter {
         return { sql: `${quotedField} <= ?`, params: [this.mapWhereValue(value)] };
       case "in": {
         const list = Array.isArray(value) ? value : [value];
-        const params: SqliteValue[] = [];
-        for (let i = 0; i < list.length; i++) {
-          params.push(this.mapWhereValue(list[i]));
-        }
+        if (list.length === 0) return { sql: "1=0", params: [] };
         return {
           sql: `${quotedField} IN (${list.map(() => "?").join(", ")})`,
-          params,
+          params: list.map((v) => this.mapWhereValue(v)),
         };
       }
       case "not_in": {
         const list = Array.isArray(value) ? value : [value];
-        const params: SqliteValue[] = [];
-        for (let i = 0; i < list.length; i++) {
-          params.push(this.mapWhereValue(list[i]));
-        }
+        if (list.length === 0) return { sql: "1=1", params: [] };
         return {
           sql: `${quotedField} NOT IN (${list.map(() => "?").join(", ")})`,
-          params,
+          params: list.map((v) => this.mapWhereValue(v)),
         };
       }
       default:
@@ -660,9 +628,9 @@ export class SqliteAdapter implements Adapter {
         continue;
       }
 
-      if (field.type.type === "json") {
+      if (field.type === "json" || field.type === "json[]") {
         result[fieldName] = JSON.stringify(val);
-      } else if (field.type.type === "boolean") {
+      } else if (field.type === "boolean") {
         result[fieldName] = val === true ? 1 : 0;
       } else if (
         typeof val === "string" ||
@@ -679,44 +647,29 @@ export class SqliteAdapter implements Adapter {
   }
 
   private mapRow<T>(modelName: string, row: Record<string, unknown>): T {
-    const model = this.schema[modelName];
-    if (model === undefined) {
-      if (isModelType<T>(row)) return row;
-      throw new Error("Invalid row data");
-    }
+    const model = (this.schema as any)[modelName];
+    if (model === undefined) return row as T;
 
-    for (const [fieldName, field] of Object.entries(model.fields)) {
+    for (const [fieldName, field] of Object.entries(model.fields as Record<string, any>)) {
       const val = row[fieldName];
       if (val === undefined || val === null) continue;
 
-      if (field.type.type === "json" && typeof val === "string") {
+      if ((field.type === "json" || field.type === "json[]") && typeof val === "string") {
         try {
           row[fieldName] = JSON.parse(val);
         } catch {
           // Keep as string if parsing fails
         }
-      } else if (field.type.type === "boolean") {
+      } else if (field.type === "boolean") {
         row[fieldName] = val === 1 || val === true;
+      } else if (field.type === "number" || field.type === "timestamp") {
+        if (typeof val === "string") {
+          row[fieldName] = Number(val);
+        } else if (typeof val === "bigint") {
+          row[fieldName] = Number(val);
+        }
       }
     }
-
-    if (isModelType<T>(row)) return row;
-    throw new Error("Row does not conform to model bounds");
+    return row as T;
   }
-}
-
-export function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
-function isValidField<T>(field: unknown): field is FieldName<T> {
-  return typeof field === "string" && field !== "";
-}
-
-function isStringKey(key: unknown): key is string {
-  return typeof key === "string" && key !== "";
-}
-
-function isModelType<T>(obj: unknown): obj is T {
-  return typeof obj === "object" && obj !== null;
 }

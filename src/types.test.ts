@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import type { InferModel, Schema } from "./core";
+import type { InferModel, Schema } from "./types";
 
 describe("no-orm core", () => {
   it("should infer correct types for a schema", () => {

@@ -1,12 +1,14 @@
-# no-orm
+# @8monkey/no-orm
 
-A tiny, database-independent persistence core for TypeScript libraries. No heavy abstractions, just the primitives.
+A tiny, composable ORM core for TypeScript libraries. No heavy abstractions, just the primitives to build cross-database tools with full type safety.
 
 ## Features
 
-- **Canonical Schema**: One portable schema representation for any database.
-- **Type Inference**: Derive TypeScript types directly from your schema.
-- **Adapter-Based**: Small, generic execution contract for multiple backends.
+- **Tiny Core**: Minimal overhead, focuses on schema definition and basic CRUD.
+- **Full Type Safety**: Inferred models from your schema definition.
+- **Adapter-Based**: Switch between SQLite, PostgreSQL (coming soon), and more.
+- **Nested JSON Support**: Query and filter nested JSON fields seamlessly.
+- **Transactions**: Built-in support for stacked transactions with automatic rollbacks.
 
 ## Installation
 
@@ -14,7 +16,7 @@ A tiny, database-independent persistence core for TypeScript libraries. No heavy
 bun add @8monkey/no-orm
 ```
 
-## Usage
+## Quick Start
 
 ### 1. Define your Schema
 
@@ -22,81 +24,71 @@ bun add @8monkey/no-orm
 import { Schema } from "@8monkey/no-orm";
 
 export const schema = {
-  conversations: {
+  users: {
     fields: {
-      id: { type: { type: "string", max: 255 } },
-      created_at: { type: { type: "timestamp" } },
-      metadata: { type: { type: "json" }, nullable: true },
+      id: { type: "string" },
+      name: { type: "string" },
+      age: { type: "number" },
+      metadata: { type: "json", nullable: true },
+      tags: { type: "json[]" },
     },
-    primaryKey: {
-      fields: ["id"],
-    },
+    primaryKey: "id",
     indexes: [
-      {
-        fields: [
-          { field: "created_at", order: "desc" },
-          { field: "id", order: "desc" },
-        ],
-      },
+      { field: "age" },
+      { field: ["name", "age"], order: "desc" },
     ],
   },
 } as const satisfies Schema;
 ```
 
-### 2. Infer Types
+### 2. Initialize the Adapter
 
 ```typescript
-import { InferModel } from "@8monkey/no-orm";
+import { SqliteAdapter } from "@8monkey/no-orm/adapters/sqlite";
+import { Database } from "bun:sqlite";
 
-export type Conversation = InferModel<typeof schema.conversations>;
-// Result: { id: string; created_at: number; metadata: Record<string, unknown> | null; }
-```
+const db = new Database(":memory:");
+const adapter = new SqliteAdapter(schema, db);
 
-### 3. Use an Adapter
-
-```typescript
-import { Adapter } from "@8monkey/no-orm";
-// Import a concrete adapter (e.g., @8monkey/no-orm-sqlite)
-
-const adapter: Adapter = new SqliteAdapter(schema, db);
-
-// Minimal Schema Bootstrap
 await adapter.migrate();
 
 // You can seamlessly query nested JSON!
-const darkUsers = await adapter.findMany({
-  model: "conversations",
-  where: { field: "metadata", path: ["theme"], op: "eq", value: "dark" },
-});
-
-// Create a record
-const conv = await adapter.create({
-  model: "conversations",
-  data: {
-    id: "conv_123",
-    created_at: Date.now(),
-    metadata: { theme: "dark" },
-  },
-});
-
-// Find many with filters
-const results = await adapter.findMany({
-  model: "conversations",
+const users = await adapter.findMany({
+  model: "users",
   where: {
-    field: "created_at",
-    op: "gt",
-    value: Date.now() - 86400000,
+    field: "metadata",
+    path: ["settings", "theme"],
+    op: "eq",
+    value: "dark",
   },
-  limit: 10,
 });
 ```
+
+### 3. Transactions
+
+```typescript
+await adapter.transaction(async (tx) => {
+  await tx.create({
+    model: "users",
+    data: { id: "1", name: "Alice", age: 30, tags: ["admin"] },
+  });
+  
+  // Nested transactions use SAVEPOINTs automatically
+  await tx.transaction(async (inner) => {
+    await inner.update({
+      model: "users",
+      where: { field: "id", op: "eq", value: "1" },
+      data: { age: 31 },
+    });
+  });
+});
+```
+
+## Limitations
+
+- **Concurrent Transactions**: If you share a single database connection globally (e.g., a single `bun:sqlite` instance) across concurrent web requests, their `adapter.transaction()` calls will interleave on the same connection. `no-orm` uses `AsyncLocalStorage` to ensure that operations within a transaction block use the correct savepoint state, but for true isolation in highly concurrent environments, consider a connection pool.
+- **Upserts on JSON paths**: Upsert operations require the conflict target to be explicitly identifiable (like a `PRIMARY KEY`). `no-orm` does not support using `path` arguments in the `where` clause for `upsert` to prevent ambiguity.
 
 ## License
 
 MIT
-
-### Limitations
-
-- **Upserts on JSON paths:** Upsert operations require the conflict target to be explicitly identifiable by the database engine (like a `UNIQUE` index or `PRIMARY KEY`). Because `no-orm` focuses on minimal schema bootstrapping and doesn't enforce `UNIQUE` expression indexes natively in v1, upsert operations containing `path` arguments in the `where` clause will throw an error to prevent silent data corruption.
-
-- **Concurrent Transactions:** `no-orm` does not manage connection pools or implement JavaScript mutexes. If you share a single database connection globally (e.g., a single `bun:sqlite` instance) across concurrent web requests, their `adapter.transaction()` calls will interleave on the same connection, causing unpredictable rollbacks. For concurrent transactions, you must instantiate a new `Adapter` per request using a dedicated connection from a pool.

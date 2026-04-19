@@ -8,30 +8,26 @@ export type Schema = Record<string, Model>;
 
 export interface Model {
   fields: Record<string, Field>;
-  primaryKey: {
-    fields: [string, ...string[]];
-  };
+  primaryKey: string | string[];
   indexes?: Index[];
 }
 
 export interface Field {
   type: FieldType;
   nullable?: boolean;
+  max?: number; // Only for string
 }
 
 export type FieldType =
-  | { type: "string"; max?: number }
-  | { type: "number" }
-  | { type: "boolean" }
-  | { type: "timestamp" }
-  | { type: "json" };
+  | "string"
+  | "number"
+  | "boolean"
+  | "timestamp"
+  | "json"
+  | "json[]";
 
 export interface Index {
-  fields: [IndexField, ...IndexField[]];
-}
-
-export interface IndexField {
-  field: string;
+  field: string | string[];
   order?: "asc" | "desc";
 }
 
@@ -43,69 +39,71 @@ export type InferModel<M extends Model> = {
     : ResolveTSValue<M["fields"][K]["type"]>;
 };
 
-type ResolveTSValue<T extends FieldType> = T["type"] extends "string"
+type ResolveTSValue<T extends FieldType> = T extends "string"
   ? string
-  : T["type"] extends "number"
+  : T extends "number"
     ? number
-    : T["type"] extends "boolean"
+    : T extends "boolean"
       ? boolean
-      : T["type"] extends "timestamp"
+      : T extends "timestamp"
         ? number
-        : T["type"] extends "json"
+        : T extends "json"
           ? Record<string, unknown> // Note: Defaults to object record, may need casting for JSON arrays
-          : never;
+          : T extends "json[]"
+            ? unknown[]
+            : never;
 
 // --- ADAPTER SPEC V1 (#3) ---
 
-export interface Adapter {
-  migrate?(args: { schema: Schema }): Promise<void>;
+export interface Adapter<S extends Schema = Schema> {
+  migrate?(args: { schema: S }): Promise<void>;
 
-  transaction?<T>(fn: (tx: Adapter) => Promise<T>): Promise<T>;
+  transaction?<T>(fn: (tx: Adapter<S>) => Promise<T>): Promise<T>;
 
-  create<T extends Record<string, unknown> = Record<string, unknown>>(args: {
-    model: string;
+  create<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+    model: K;
     data: T;
     select?: Select<T>;
   }): Promise<T>;
 
-  update<T extends Record<string, unknown> = Record<string, unknown>>(args: {
-    model: string;
+  update<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+    model: K;
     where: Where<T>;
     data: Partial<T>;
   }): Promise<T | null>;
 
-  updateMany<T extends Record<string, unknown> = Record<string, unknown>>(args: {
-    model: string;
+  updateMany<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+    model: K;
     where?: Where<T>;
     data: Partial<T>;
   }): Promise<number>;
 
-  upsert?<T extends Record<string, unknown> = Record<string, unknown>>(args: {
-    model: string;
-    where: Where<T>;
+  upsert?<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+    model: K;
+    where: WhereWithoutPath<T>;
     create: T;
     update: Partial<T>;
     select?: Select<T>;
   }): Promise<T>;
 
-  delete<T extends Record<string, unknown> = Record<string, unknown>>(args: {
-    model: string;
+  delete<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+    model: K;
     where: Where<T>;
   }): Promise<void>;
 
-  deleteMany?<T extends Record<string, unknown> = Record<string, unknown>>(args: {
-    model: string;
+  deleteMany?<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+    model: K;
     where?: Where<T>;
   }): Promise<number>;
 
-  find<T extends Record<string, unknown> = Record<string, unknown>>(args: {
-    model: string;
+  find<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+    model: K;
     where: Where<T>;
     select?: Select<T>;
   }): Promise<T | null>;
 
-  findMany<T extends Record<string, unknown> = Record<string, unknown>>(args: {
-    model: string;
+  findMany<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+    model: K;
     where?: Where<T>;
     select?: Select<T>;
     sortBy?: SortBy<T>[];
@@ -114,8 +112,8 @@ export interface Adapter {
     cursor?: Cursor<T>;
   }): Promise<T[]>;
 
-  count?<T extends Record<string, unknown> = Record<string, unknown>>(args: {
-    model: string;
+  count?<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+    model: K;
     where?: Where<T>;
   }): Promise<number>;
 }
@@ -149,6 +147,10 @@ export type Where<T = Record<string, unknown>> =
   | {
       or: Where<T>[];
     };
+
+export type WhereWithoutPath<T = Record<string, unknown>> = Omit<Where<T>, "path"> & {
+  path?: never;
+};
 
 export interface SortBy<T = Record<string, unknown>> {
   field: FieldName<T>;
