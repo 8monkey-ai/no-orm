@@ -1,7 +1,8 @@
-import { describe, expect, it, beforeEach } from "bun:test";
 import { Database } from "bun:sqlite";
+import { describe, expect, it, beforeEach } from "bun:test";
+
+import type { Schema, InferModel } from "../types";
 import { SqliteAdapter } from "./sqlite";
-import type { Schema } from "../types";
 
 const schema = {
   users: {
@@ -18,14 +19,7 @@ const schema = {
   },
 } as const satisfies Schema;
 
-type User = {
-  id: string;
-  name: string;
-  age: number;
-  is_active: boolean;
-  metadata?: { theme: string; window?: { width: number } } | null;
-  tags?: string[] | null;
-};
+type User = InferModel<typeof schema.users>;
 
 describe("SqliteAdapter", () => {
   let db: Database;
@@ -49,19 +43,19 @@ describe("SqliteAdapter", () => {
       };
       await adapter.create({ model: "users", data: user });
 
-      const found = await adapter.find({
+      const found = await adapter.find<"users", User>({
         model: "users",
         where: { field: "id", op: "eq", value: "u1" },
       });
-      expect(found).toEqual(expect.objectContaining(user));
+      expect(found).toEqual(user);
     });
 
     it("should update a record and refetch correctly", async () => {
       await adapter.create({
         model: "users",
-        data: { id: "u1", name: "Alice", age: 30, is_active: true },
+        data: { id: "u1", name: "Alice", age: 30, is_active: true, metadata: null, tags: null },
       });
-      const updated = await adapter.update({
+      const updated = await adapter.update<"users", User>({
         model: "users",
         where: { field: "id", op: "eq", value: "u1" },
         data: { age: 31 },
@@ -69,16 +63,31 @@ describe("SqliteAdapter", () => {
       expect(updated?.age).toBe(31);
     });
 
+    it("should reject primary key updates", async () => {
+      await adapter.create({
+        model: "users",
+        data: { id: "u1", name: "Alice", age: 30, is_active: true, metadata: null, tags: null },
+      });
+
+      expect(() =>
+        adapter.update<"users", User>({
+          model: "users",
+          where: { field: "id", op: "eq", value: "u1" },
+          data: { id: "u2" },
+        }),
+      ).toThrow("Primary key updates are not supported.");
+    });
+
     it("should delete a record", async () => {
       await adapter.create({
         model: "users",
-        data: { id: "u1", name: "Alice", age: 30, is_active: true },
+        data: { id: "u1", name: "Alice", age: 30, is_active: true, metadata: null, tags: null },
       });
       await adapter.delete({
         model: "users",
         where: { field: "id", op: "eq", value: "u1" },
       });
-      const found = await adapter.find({
+      const found = await adapter.find<"users", User>({
         model: "users",
         where: { field: "id", op: "eq", value: "u1" },
       });
@@ -91,21 +100,21 @@ describe("SqliteAdapter", () => {
       await Promise.all([
         adapter.create({
           model: "users",
-          data: { id: "u1", name: "Alice", age: 25, is_active: true },
+          data: { id: "u1", name: "Alice", age: 25, is_active: true, metadata: null, tags: null },
         }),
         adapter.create({
           model: "users",
-          data: { id: "u2", name: "Bob", age: 30, is_active: false },
+          data: { id: "u2", name: "Bob", age: 30, is_active: false, metadata: null, tags: null },
         }),
         adapter.create({
           model: "users",
-          data: { id: "u3", name: "Charlie", age: 35, is_active: true },
+          data: { id: "u3", name: "Charlie", age: 35, is_active: true, metadata: null, tags: null },
         }),
       ]);
     });
 
     it("should filter with 'in' operator", async () => {
-      const users = await adapter.findMany({
+      const users = await adapter.findMany<"users", User>({
         model: "users",
         where: { field: "age", op: "in", value: [25, 35] },
       });
@@ -113,7 +122,7 @@ describe("SqliteAdapter", () => {
     });
 
     it("should handle empty 'in' list gracefully", async () => {
-      const users = await adapter.findMany({
+      const users = await adapter.findMany<"users", User>({
         model: "users",
         where: { field: "age", op: "in", value: [] },
       });
@@ -121,7 +130,7 @@ describe("SqliteAdapter", () => {
     });
 
     it("should handle complex AND / OR where clauses", async () => {
-      const found = await adapter.findMany({
+      const found = await adapter.findMany<"users", User>({
         model: "users",
         where: {
           or: [
@@ -142,7 +151,7 @@ describe("SqliteAdapter", () => {
     });
 
     it("should sort records", async () => {
-      const users = await adapter.findMany({
+      const users = await adapter.findMany<"users", User>({
         model: "users",
         sortBy: [{ field: "age", direction: "desc" }],
       });
@@ -160,6 +169,7 @@ describe("SqliteAdapter", () => {
           age: 20,
           is_active: true,
           metadata: { theme: "dark", window: { width: 800 } },
+          tags: null,
         },
       });
       await adapter.create({
@@ -170,6 +180,7 @@ describe("SqliteAdapter", () => {
           age: 20,
           is_active: true,
           metadata: { theme: "light", window: { width: 1024 } },
+          tags: null,
         },
       });
       await adapter.create({
@@ -180,18 +191,19 @@ describe("SqliteAdapter", () => {
           age: 20,
           is_active: true,
           metadata: { theme: "dark", window: { width: 1920 } },
+          tags: null,
         },
       });
 
       // 1. Exact match on nested string (theme = 'dark')
-      const darkUsers = await adapter.findMany({
+      const darkUsers = await adapter.findMany<"users", User>({
         model: "users",
         where: { field: "metadata", path: ["theme"], op: "eq", value: "dark" },
       });
       expect(darkUsers).toHaveLength(2);
 
       // 2. Numeric operator on deeply nested number (window.width > 900)
-      const wideUsers = await adapter.findMany({
+      const wideUsers = await adapter.findMany<"users", User>({
         model: "users",
         where: { field: "metadata", path: ["window", "width"], op: "gt", value: 900 },
       });
@@ -204,10 +216,10 @@ describe("SqliteAdapter", () => {
       await adapter.transaction(async (tx) => {
         await tx.create({
           model: "users",
-          data: { id: "t1", name: "TxUser1", age: 20, is_active: true },
+          data: { id: "t1", name: "TxUser1", age: 20, is_active: true, metadata: null, tags: null },
         });
       });
-      const found = await adapter.find({
+      const found = await adapter.find<"users", User>({
         model: "users",
         where: { field: "id", op: "eq", value: "t1" },
       });
@@ -219,14 +231,21 @@ describe("SqliteAdapter", () => {
         await adapter.transaction(async (tx) => {
           await tx.create({
             model: "users",
-            data: { id: "t1", name: "TxUser1", age: 20, is_active: true },
+            data: {
+              id: "t1",
+              name: "TxUser1",
+              age: 20,
+              is_active: true,
+              metadata: null,
+              tags: null,
+            },
           });
           throw new Error("Failure");
         });
       } catch {
         // expected
       }
-      const found = await adapter.find({
+      const found = await adapter.find<"users", User>({
         model: "users",
         where: { field: "id", op: "eq", value: "t1" },
       });
@@ -235,14 +254,15 @@ describe("SqliteAdapter", () => {
 
     it("should handle nested transactions with savepoints", async () => {
       await adapter.transaction(async (outer) => {
+        if (!outer.transaction) throw new Error("Transactions not supported");
         await outer.create({
           model: "users",
-          data: { id: "n1", name: "Outer1", age: 20, is_active: true },
+          data: { id: "n1", name: "Outer1", age: 20, is_active: true, metadata: null, tags: null },
         });
 
         try {
           await outer.transaction(async (inner) => {
-            await inner.update({
+            await inner.update<"users", User>({
               model: "users",
               where: { field: "id", op: "eq", value: "n1" },
               data: { age: 40 },
@@ -254,7 +274,7 @@ describe("SqliteAdapter", () => {
         }
       });
 
-      const found = await adapter.find({
+      const found = await adapter.find<"users", User>({
         model: "users",
         where: { field: "id", op: "eq", value: "n1" },
       });
@@ -266,26 +286,26 @@ describe("SqliteAdapter", () => {
     it("should handle multi-field keyset pagination correctly", async () => {
       await adapter.create({
         model: "users",
-        data: { id: "m1", name: "A", age: 30, is_active: true },
+        data: { id: "m1", name: "A", age: 30, is_active: true, metadata: null, tags: null },
       });
       await adapter.create({
         model: "users",
-        data: { id: "m2", name: "B", age: 30, is_active: true },
+        data: { id: "m2", name: "B", age: 30, is_active: true, metadata: null, tags: null },
       });
       await adapter.create({
         model: "users",
-        data: { id: "m3", name: "C", age: 30, is_active: true },
+        data: { id: "m3", name: "C", age: 30, is_active: true, metadata: null, tags: null },
       });
       await adapter.create({
         model: "users",
-        data: { id: "m4", name: "A", age: 31, is_active: true },
+        data: { id: "m4", name: "A", age: 31, is_active: true, metadata: null, tags: null },
       });
       await adapter.create({
         model: "users",
-        data: { id: "m5", name: "B", age: 31, is_active: true },
+        data: { id: "m5", name: "B", age: 31, is_active: true, metadata: null, tags: null },
       });
 
-      const result = await adapter.findMany({
+      const result = await adapter.findMany<"users", User>({
         model: "users",
         sortBy: [
           { field: "age", direction: "asc" },
@@ -315,6 +335,8 @@ describe("SqliteAdapter", () => {
                 name: `User ${i}`,
                 age: 20 + i,
                 is_active: true,
+                metadata: null,
+                tags: null,
               },
             }),
           );
@@ -323,7 +345,7 @@ describe("SqliteAdapter", () => {
       });
 
       it("should respect limit and offset", async () => {
-        const page1 = await adapter.findMany({
+        const page1 = await adapter.findMany<"users", User>({
           model: "users",
           sortBy: [{ field: "age", direction: "asc" }],
           limit: 2,
@@ -332,7 +354,7 @@ describe("SqliteAdapter", () => {
         expect(page1).toHaveLength(2);
         expect(page1[0]?.id).toBe("p1");
 
-        const page2 = await adapter.findMany({
+        const page2 = await adapter.findMany<"users", User>({
           model: "users",
           sortBy: [{ field: "age", direction: "asc" }],
           limit: 2,
@@ -343,7 +365,7 @@ describe("SqliteAdapter", () => {
       });
 
       it("should handle cursor pagination ascending", async () => {
-        const result = await adapter.findMany({
+        const result = await adapter.findMany<"users", User>({
           model: "users",
           sortBy: [{ field: "age", direction: "asc" }],
           cursor: { after: { age: 22 } },
@@ -355,7 +377,7 @@ describe("SqliteAdapter", () => {
       });
 
       it("should handle cursor pagination descending", async () => {
-        const result = await adapter.findMany({
+        const result = await adapter.findMany<"users", User>({
           model: "users",
           sortBy: [{ field: "age", direction: "desc" }],
           cursor: { after: { age: 24 } },
@@ -370,35 +392,62 @@ describe("SqliteAdapter", () => {
 
   describe("Upsert", () => {
     it("should handle upsert correctly", async () => {
-      const data = { id: "u1", name: "Alice", age: 25, is_active: true };
+      const data: User = {
+        id: "u1",
+        name: "Alice",
+        age: 25,
+        is_active: true,
+        metadata: null,
+        tags: null,
+      };
 
       // Insert
-      await adapter.upsert({
+      await adapter.upsert<"users", User>({
         model: "users",
         where: { field: "id", op: "eq", value: "u1" },
         create: data,
         update: { age: 26 },
       });
 
-      let found = await adapter.find({
+      let found = await adapter.find<"users", User>({
         model: "users",
         where: { field: "id", op: "eq", value: "u1" },
       });
       expect(found?.age).toBe(25);
 
       // Update
-      await adapter.upsert({
+      await adapter.upsert<"users", User>({
         model: "users",
         where: { field: "id", op: "eq", value: "u1" },
         create: data,
         update: { age: 26 },
       });
 
-      found = await adapter.find({
+      found = await adapter.find<"users", User>({
         model: "users",
         where: { field: "id", op: "eq", value: "u1" },
       });
       expect(found?.age).toBe(26);
+    });
+
+    it("should require primary-key equality in upsert filters", () => {
+      const data: User = {
+        id: "u1",
+        name: "Alice",
+        age: 25,
+        is_active: true,
+        metadata: null,
+        tags: null,
+      };
+
+      expect(() =>
+        adapter.upsert<"users", User>({
+          model: "users",
+          where: { field: "name", op: "eq", value: "Alice" },
+          create: data,
+          update: { age: 26 },
+        }),
+      ).toThrow("Upsert requires equality filters for every primary key field.");
     });
   });
 });

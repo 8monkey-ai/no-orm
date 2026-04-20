@@ -18,13 +18,8 @@ export interface Field {
   max?: number; // Only for string
 }
 
-export type FieldType =
-  | "string"
-  | "number"
-  | "boolean"
-  | "timestamp"
-  | "json"
-  | "json[]";
+export type FieldType = "string" | "number" | "boolean" | "timestamp" | "json" | "json[]";
+// Note: "number" and "timestamp" intentionally exclude bigint support in v1 to keep the core tiny.
 
 export interface Index {
   field: string | string[];
@@ -37,7 +32,7 @@ export type InferModel<M extends Model> = {
   [K in keyof M["fields"]]: M["fields"][K]["nullable"] extends true
     ? ResolveTSValue<M["fields"][K]["type"]> | null
     : ResolveTSValue<M["fields"][K]["type"]>;
-};
+} & Record<string, unknown>;
 
 type ResolveTSValue<T extends FieldType> = T extends "string"
   ? string
@@ -60,25 +55,28 @@ export interface Adapter<S extends Schema = Schema> {
 
   transaction?<T>(fn: (tx: Adapter<S>) => Promise<T>): Promise<T>;
 
-  create<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+  create<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
     model: K;
     data: T;
     select?: Select<T>;
   }): Promise<T>;
 
-  update<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+  update<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
     model: K;
     where: Where<T>;
     data: Partial<T>;
   }): Promise<T | null>;
 
-  updateMany<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+  updateMany<
+    K extends keyof S & string,
+    T extends Record<string, unknown> = InferModel<S[K]>,
+  >(args: {
     model: K;
     where?: Where<T>;
     data: Partial<T>;
   }): Promise<number>;
 
-  upsert?<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+  upsert?<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
     model: K;
     where: WhereWithoutPath<T>;
     create: T;
@@ -86,23 +84,26 @@ export interface Adapter<S extends Schema = Schema> {
     select?: Select<T>;
   }): Promise<T>;
 
-  delete<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+  delete<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
     model: K;
     where: Where<T>;
   }): Promise<void>;
 
-  deleteMany?<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+  deleteMany?<
+    K extends keyof S & string,
+    T extends Record<string, unknown> = InferModel<S[K]>,
+  >(args: {
     model: K;
     where?: Where<T>;
   }): Promise<number>;
 
-  find<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+  find<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
     model: K;
     where: Where<T>;
     select?: Select<T>;
   }): Promise<T | null>;
 
-  findMany<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+  findMany<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
     model: K;
     where?: Where<T>;
     select?: Select<T>;
@@ -112,7 +113,7 @@ export interface Adapter<S extends Schema = Schema> {
     cursor?: Cursor<T>;
   }): Promise<T[]>;
 
-  count?<K extends keyof S & string, T = InferModel<S[K]>>(args: {
+  count?<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
     model: K;
     where?: Where<T>;
   }): Promise<number>;
@@ -126,13 +127,7 @@ export type Where<T = Record<string, unknown>> =
   | {
       field: FieldName<T>;
       path?: string[];
-      op: "eq" | "ne";
-      value: unknown;
-    }
-  | {
-      field: FieldName<T>;
-      path?: string[];
-      op: "gt" | "gte" | "lt" | "lte";
+      op: "eq" | "ne" | "gt" | "gte" | "lt" | "lte";
       value: unknown;
     }
   | {
@@ -148,9 +143,27 @@ export type Where<T = Record<string, unknown>> =
       or: Where<T>[];
     };
 
-export type WhereWithoutPath<T = Record<string, unknown>> = Omit<Where<T>, "path"> & {
-  path?: never;
-};
+export type WhereWithoutPath<T = Record<string, unknown>> =
+  | {
+      field: FieldName<T>;
+      op: "eq" | "ne" | "gt" | "gte" | "lt" | "lte";
+      value: unknown;
+      path?: never;
+    }
+  | {
+      field: FieldName<T>;
+      op: "in" | "not_in";
+      value: unknown[];
+      path?: never;
+    }
+  | {
+      and: WhereWithoutPath<T>[];
+      path?: never;
+    }
+  | {
+      or: WhereWithoutPath<T>[];
+      path?: never;
+    };
 
 export interface SortBy<T = Record<string, unknown>> {
   field: FieldName<T>;

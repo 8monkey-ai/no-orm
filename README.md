@@ -1,14 +1,15 @@
 # @8monkey/no-orm
 
-A tiny, composable ORM core for TypeScript libraries. No heavy abstractions, just the primitives to build cross-database tools with full type safety.
+A tiny, schema-first persistence core for TypeScript libraries.
 
-## Features
+`no-orm` is intentionally small:
 
-- **Tiny Core**: Minimal overhead, focuses on schema definition and basic CRUD.
-- **Full Type Safety**: Inferred models from your schema definition.
-- **Adapter-Based**: Switch between SQLite, PostgreSQL (coming soon), and more.
-- **Nested JSON Support**: Query and filter nested JSON fields seamlessly.
-- **Transactions**: Built-in support for stacked transactions with automatic rollbacks.
+- one canonical schema shape
+- inferred TypeScript model types
+- adapter-based persistence
+- minimal CRUD, filtering, ordering, pagination, and transactions
+
+It is not a query builder, migration framework, or full ORM runtime.
 
 ## Installation
 
@@ -16,78 +17,146 @@ A tiny, composable ORM core for TypeScript libraries. No heavy abstractions, jus
 bun add @8monkey/no-orm
 ```
 
-## Quick Start
+## Define a Schema
 
-### 1. Define your Schema
-
-```typescript
-import { Schema } from "@8monkey/no-orm";
+```ts
+import type { InferModel, Schema } from "@8monkey/no-orm";
 
 export const schema = {
   users: {
     fields: {
       id: { type: "string" },
-      name: { type: "string" },
+      name: { type: "string", max: 255 },
       age: { type: "number" },
+      is_active: { type: "boolean" },
       metadata: { type: "json", nullable: true },
-      tags: { type: "json[]" },
+      tags: { type: "json[]", nullable: true },
+      created_at: { type: "timestamp" },
     },
     primaryKey: "id",
-    indexes: [
-      { field: "age" },
-      { field: ["name", "age"], order: "desc" },
-    ],
+    indexes: [{ field: "created_at", order: "desc" }],
   },
 } as const satisfies Schema;
+
+type User = InferModel<typeof schema.users>;
 ```
 
-### 2. Initialize the Adapter
+## Choose an Adapter
 
-```typescript
-import { SqliteAdapter } from "@8monkey/no-orm/adapters/sqlite";
+### SQLite
+
+```ts
 import { Database } from "bun:sqlite";
+import { SqliteAdapter } from "@8monkey/no-orm/adapters/sqlite";
 
 const db = new Database(":memory:");
 const adapter = new SqliteAdapter(schema, db);
 
 await adapter.migrate();
+```
 
-// You can seamlessly query nested JSON!
-const users = await adapter.findMany({
+### Postgres
+
+```ts
+import { SQL } from "bun";
+import { PostgresAdapter } from "@8monkey/no-orm/adapters/postgres";
+
+const sql = new SQL(process.env.POSTGRES_URL!);
+const adapter = new PostgresAdapter(schema, sql);
+
+await adapter.migrate();
+```
+
+### Memory
+
+```ts
+import { MemoryAdapter } from "@8monkey/no-orm/adapters/memory";
+
+const adapter = new MemoryAdapter(schema);
+await adapter.migrate({ schema });
+```
+
+## Basic Operations
+
+```ts
+const created = await adapter.create<"users", User>({
+  model: "users",
+  data: {
+    id: "u1",
+    name: "Alice",
+    age: 30,
+    is_active: true,
+    metadata: { theme: "dark" },
+    tags: ["admin"],
+    created_at: Date.now(),
+  },
+});
+
+const found = await adapter.find<"users", User>({
+  model: "users",
+  where: { field: "id", op: "eq", value: "u1" },
+});
+
+const recentUsers = await adapter.findMany<"users", User>({
+  model: "users",
+  where: { field: "is_active", op: "eq", value: true },
+  sortBy: [{ field: "created_at", direction: "desc" }],
+  limit: 20,
+});
+```
+
+## JSON Path Filters
+
+Nested JSON filters use the base field plus a `path` array:
+
+```ts
+const darkUsers = await adapter.findMany<"users", User>({
   model: "users",
   where: {
     field: "metadata",
-    path: ["settings", "theme"],
+    path: ["preferences", "theme"],
     op: "eq",
     value: "dark",
   },
 });
 ```
 
-### 3. Transactions
+Path segments are intentionally restricted to simple identifiers so adapters can
+compile them safely for each backend.
 
-```typescript
+## Transactions
+
+```ts
 await adapter.transaction(async (tx) => {
   await tx.create({
     model: "users",
-    data: { id: "1", name: "Alice", age: 30, tags: ["admin"] },
+    data: {
+      id: "u2",
+      name: "Bob",
+      age: 28,
+      is_active: true,
+      metadata: null,
+      tags: null,
+      created_at: Date.now(),
+    },
   });
-  
-  // Nested transactions use SAVEPOINTs automatically
-  await tx.transaction(async (inner) => {
-    await inner.update({
-      model: "users",
-      where: { field: "id", op: "eq", value: "1" },
-      data: { age: 31 },
-    });
+
+  await tx.update({
+    model: "users",
+    where: { field: "id", op: "eq", value: "u2" },
+    data: { age: 29 },
   });
 });
 ```
 
-## Limitations
+SQLite and Postgres both support nested transactions through savepoints.
 
-- **Concurrent Transactions**: If you share a single database connection globally (e.g., a single `bun:sqlite` instance) across concurrent web requests, their `adapter.transaction()` calls will interleave on the same connection. `no-orm` uses `AsyncLocalStorage` to ensure that operations within a transaction block use the correct savepoint state, but for true isolation in highly concurrent environments, consider a connection pool.
-- **Upserts on JSON paths**: Upsert operations require the conflict target to be explicitly identifiable (like a `PRIMARY KEY`). `no-orm` does not support using `path` arguments in the `where` clause for `upsert` to prevent ambiguity.
+## Notes
+
+- `upsert` is intentionally conservative in v1: the `where` clause must be equality conditions for every primary-key field.
+- Primary-key updates are rejected to keep adapter behavior simple and consistent across backends.
+- SQLite stores JSON as text; Postgres stores JSON as `jsonb`.
+- **Numeric Precision**: `number` and `timestamp` fields use standard JavaScript `Number`. `bigint` is intentionally not supported in v1 to keep the core and adapters tiny.
 
 ## License
 

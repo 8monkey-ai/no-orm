@@ -7,15 +7,13 @@ describe("no-orm core", () => {
     const schema = {
       users: {
         fields: {
-          id: { type: { type: "string" } },
-          age: { type: { type: "number" } },
-          is_active: { type: { type: "boolean" } },
-          created_at: { type: { type: "timestamp" } },
-          metadata: { type: { type: "json" }, nullable: true },
+          id: { type: "string" },
+          age: { type: "number" },
+          is_active: { type: "boolean" },
+          created_at: { type: "timestamp" },
+          metadata: { type: "json", nullable: true },
         },
-        primaryKey: {
-          fields: ["id"],
-        },
+        primaryKey: "id",
       },
     } as const satisfies Schema;
 
@@ -51,18 +49,18 @@ describe("no-orm core", () => {
     const schema = {
       conversations: {
         fields: {
-          id: { type: { type: "string", max: 255 } },
-          created_at: { type: { type: "timestamp" } },
+          id: { type: "string", max: 255 },
+          created_at: { type: "timestamp" },
         },
-        primaryKey: { fields: ["id"] },
+        primaryKey: "id",
       },
       messages: {
         fields: {
-          id: { type: { type: "string", max: 255 } },
-          conversation_id: { type: { type: "string", max: 255 } },
-          content: { type: { type: "string" } },
+          id: { type: "string", max: 255 },
+          conversation_id: { type: "string", max: 255 },
+          content: { type: "string" },
         },
-        primaryKey: { fields: ["id"] },
+        primaryKey: "id",
       },
     } as const satisfies Schema;
 
