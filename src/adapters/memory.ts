@@ -6,12 +6,11 @@ import type {
   Select,
   SortBy,
   Where,
-  WhereWithoutPath,
 } from "../types";
 import {
   assertNoPrimaryKeyUpdates,
+  getIdentityValues,
   getPrimaryKeyFields,
-  getPrimaryKeyWhereValues,
   isRecord,
 } from "./common";
 
@@ -23,7 +22,7 @@ type RowData = Record<string, unknown>;
  * Useful for testing, development, and small-scale caching.
  */
 export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
-  private storage = new Map<string, Map<string, InferModel<S[keyof S]>>>();
+  private storage = new Map<string, Map<string, Record<string, unknown>>>();
 
   constructor(private schema: S) {}
 
@@ -55,7 +54,8 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
       throw new Error(`Record with primary key ${pkValue} already exists in ${model}`);
     }
 
-    const record: T = { ...data };
+    // Optimization: Avoid object spread in hot path
+    const record = Object.assign({}, data) as T;
     modelStorage.set(pkValue, record);
 
     return Promise.resolve(this.applySelect(record, select));
@@ -70,8 +70,8 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     const modelStorage = this.getModelStorage<K, T>(model);
 
     for (const record of modelStorage.values()) {
-      if (this.evaluateWhere(where, record)) {
-        return Promise.resolve(this.applySelect(record, select));
+      if (this.evaluateWhere(where, record as T)) {
+        return Promise.resolve(this.applySelect(record as T, select));
       }
     }
 
@@ -90,7 +90,7 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     const { model, where, select, sortBy, limit, offset, cursor } = args;
     const modelStorage = this.getModelStorage<K, T>(model);
 
-    let results = Array.from(modelStorage.values());
+    let results = Array.from(modelStorage.values()) as T[];
 
     if (where) {
       results = results.filter((record) => this.evaluateWhere(where, record));
@@ -121,7 +121,7 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
             let allPreviousEqual = true;
             for (let j = 0; j < i; j++) {
               const prev = sortCriteria[j]!;
-              const recordVal = this.getValue(record, prev.field, prev.path);
+              const recordVal = this.getValue(record as RowData, prev.field, prev.path);
               const cursorVal = cursorValues[prev.field];
               if (this.compareValues(recordVal, cursorVal) !== 0) {
                 allPreviousEqual = false;
@@ -132,7 +132,7 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
             if (!allPreviousEqual) continue;
 
             const current = sortCriteria[i]!;
-            const recordVal = this.getValue(record, current.field, current.path);
+            const recordVal = this.getValue(record as RowData, current.field, current.path);
             const cursorVal = cursorValues[current.field];
             const comp = this.compareValues(recordVal, cursorVal);
 
@@ -152,8 +152,8 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     if (sortBy) {
       results.sort((a, b) => {
         for (const { field, direction, path } of sortBy) {
-          const valA = this.getValue(a, field as string, path);
-          const valB = this.getValue(b, field as string, path);
+          const valA = this.getValue(a as RowData, field as string, path);
+          const valB = this.getValue(b as RowData, field as string, path);
           if (valA === valB) continue;
           const factor = direction === "desc" ? -1 : 1;
           if (valA === undefined || valB === undefined) return 0;
@@ -178,14 +178,16 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     data: Partial<T>;
   }): Promise<T | null> {
     const { model, where, data } = args;
-    assertNoPrimaryKeyUpdates(this.getModel(model), data);
+    const modelSpec = this.getModel(model);
+    assertNoPrimaryKeyUpdates(modelSpec, data);
     const modelStorage = this.getModelStorage<K, T>(model);
 
     for (const [pk, record] of modelStorage.entries()) {
-      if (this.evaluateWhere(where, record)) {
-        const updated: T = { ...record, ...data };
+      if (this.evaluateWhere(where, record as T)) {
+        // Optimization: Create a new object to avoid mutating internal storage reference
+        const updated = Object.assign({}, record, data) as T;
         modelStorage.set(pk, updated);
-        return Promise.resolve(updated);
+        return Promise.resolve(this.applySelect(updated, undefined));
       }
     }
 
@@ -197,13 +199,15 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: { model: K; where?: Where<T>; data: Partial<T> }): Promise<number> {
     const { model, where, data } = args;
-    assertNoPrimaryKeyUpdates(this.getModel(model), data);
+    const modelSpec = this.getModel(model);
+    assertNoPrimaryKeyUpdates(modelSpec, data);
     const modelStorage = this.getModelStorage<K, T>(model);
     let count = 0;
 
     for (const [pk, record] of modelStorage.entries()) {
-      if (where === undefined || this.evaluateWhere(where, record)) {
-        const updated: T = { ...record, ...data };
+      if (where === undefined || this.evaluateWhere(where, record as T)) {
+        // Optimization: Create a new object to avoid mutating internal storage reference
+        const updated = Object.assign({}, record, data) as T;
         modelStorage.set(pk, updated);
         count++;
       }
@@ -212,27 +216,32 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     return Promise.resolve(count);
   }
 
-  async upsert<
+  upsert<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: {
     model: K;
-    where: WhereWithoutPath<T>;
     create: T;
     update: Partial<T>;
+    where?: Where<T>;
     select?: Select<T>;
   }): Promise<T> {
-    const { model, where, create, update, select } = args;
-    getPrimaryKeyWhereValues(this.getModel(model), where);
-    assertNoPrimaryKeyUpdates(this.getModel(model), update);
-    const existing = await this.find({ model, where, select });
+    const { model, create, update, where, select } = args;
+    const modelSpec = this.getModel(model);
+    assertNoPrimaryKeyUpdates(modelSpec, update);
+
+    const pkValue = this.getPrimaryKeyString(model, create);
+    const modelStorage = this.getModelStorage<K, T>(model);
+    const existing = modelStorage.get(pkValue);
 
     if (existing) {
-      const updated = await this.update({ model, where, data: update });
-      if (updated === null) {
-        throw new Error("Failed to refetch updated record during upsert");
+      // Use optional where predicate
+      if (where === undefined || this.evaluateWhere(where, existing as T)) {
+        const updated = Object.assign({}, existing, update) as T;
+        modelStorage.set(pkValue, updated);
+        return Promise.resolve(this.applySelect(updated, select));
       }
-      return this.applySelect(updated, select);
+      return Promise.resolve(this.applySelect(existing as T, select));
     }
 
     return this.create({ model, data: create, select });
@@ -246,7 +255,7 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     const modelStorage = this.getModelStorage<K, T>(model);
 
     for (const [pk, record] of modelStorage.entries()) {
-      if (this.evaluateWhere(where, record)) {
+      if (this.evaluateWhere(where, record as T)) {
         modelStorage.delete(pk);
         return Promise.resolve();
       }
@@ -263,7 +272,7 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     let count = 0;
 
     for (const [pk, record] of modelStorage.entries()) {
-      if (where === undefined || this.evaluateWhere(where, record)) {
+      if (where === undefined || this.evaluateWhere(where, record as T)) {
         modelStorage.delete(pk);
         count++;
       }
@@ -283,7 +292,7 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
 
     let count = 0;
     for (const record of modelStorage.values()) {
-      if (this.evaluateWhere(where, record)) {
+      if (this.evaluateWhere(where, record as T)) {
         count++;
       }
     }
@@ -295,13 +304,12 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
   private getModelStorage<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
-  >(model: K): Map<string, T> {
+  >(model: K): Map<string, Record<string, unknown>> {
     const storage = this.storage.get(model);
     if (!storage) {
       throw new Error(`Model ${model} not initialized. Call migrate() first.`);
     }
-    // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
-    return storage as Map<string, T>;
+    return storage;
   }
 
   private getModel<K extends keyof S & string>(model: K): S[K] {
@@ -313,25 +321,27 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
   }
 
   private getPrimaryKeyString(modelName: string, data: Record<string, unknown>): string {
-    const model = this.schema[modelName];
-    if (!model) throw new Error(`Model ${modelName} not found in schema`);
-
+    const model = this.getModel(modelName as keyof S & string);
+    const pkValues = getIdentityValues(model, data);
     return getPrimaryKeyFields(model)
-      .map((field) => String(data[field]))
+      .map((field) => String(pkValues[field]))
       .join("|");
   }
 
   private applySelect<T extends RowData>(record: T, select?: Select<T>): T {
-    if (select === undefined) return record;
-
     const result: Partial<T> = {};
-    for (const field of select) {
-      result[field] = record[field];
+
+    if (select === undefined) {
+      // Always return a shallow clone to match DB snapshot behavior
+      return Object.assign(result, record) as T;
     }
 
-    // The public adapter contract returns `T` even when `select` narrows fields.
-    // Preserve that contract while keeping the internal representation typed.
-    // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
+    for (const field of select) {
+      const val = record[field];
+      // Normalize undefined to null to match SQL behavior
+      result[field] = val === undefined ? (null as any) : val;
+    }
+
     return result as T;
   }
 
@@ -342,7 +352,7 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
         if (!isRecord(value)) {
           return undefined;
         }
-        value = value[segment];
+        value = (value as Record<string, unknown>)[segment];
       }
     }
     return value;
@@ -386,7 +396,7 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     if (left === right) return 0;
     if (!this.isComparable(left) || !this.isComparable(right)) return 0;
     if (typeof left !== typeof right) return 0;
-    return left < right ? -1 : 1;
+    return (left as any) < (right as any) ? -1 : 1;
   }
 
   private isComparable(value: unknown): value is Comparable {

@@ -153,7 +153,8 @@ SQLite and Postgres both support nested transactions through savepoints.
 
 ## Notes
 
-- `upsert` is intentionally conservative in v1: the `where` clause must be equality conditions for every primary-key field.
+- `upsert` in v1 always conflicts on the **Primary Key**. Identity is inferred automatically from the `create` data.
+- The optional `where` clause in `upsert` acts as a **predicate** for the update: the record is only updated if the condition is met.
 - Primary-key updates are rejected to keep adapter behavior simple and consistent across backends.
 - SQLite stores JSON as text; Postgres stores JSON as `jsonb`.
 - **Numeric Precision**: `number` and `timestamp` fields use standard JavaScript `Number`. `bigint` is intentionally not supported in v1 to keep the core and adapters tiny.

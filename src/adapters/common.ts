@@ -1,4 +1,4 @@
-import type { FieldName, Model, Where, WhereWithoutPath } from "../types";
+import type { FieldName, Model, Where } from "../types";
 
 // --- Type Guards ---
 
@@ -6,16 +6,8 @@ export function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-export function isValidField<T>(field: unknown): field is FieldName<T> {
-  return typeof field === "string" && field !== "";
-}
-
-export function isStringKey(key: unknown): key is string {
-  return typeof key === "string" && key !== "";
-}
-
-export function isModelType<T>(obj: unknown): obj is T {
-  return typeof obj === "object" && obj !== null;
+export function isNonEmptyString(v: unknown): v is string {
+  return typeof v === "string" && v !== "";
 }
 
 // --- SQL Helpers ---
@@ -36,6 +28,22 @@ export function getPrimaryKeyFields(model: Model): string[] {
   return Array.isArray(model.primaryKey) ? model.primaryKey : [model.primaryKey];
 }
 
+/**
+ * Extracts primary key values from a data object based on the model schema.
+ */
+export function getIdentityValues(model: Model, data: Record<string, unknown>): Record<string, unknown> {
+  const pkFields = getPrimaryKeyFields(model);
+  const values: Record<string, unknown> = {};
+  for (const field of pkFields) {
+    const val = data[field];
+    if (val === undefined) {
+      throw new Error(`Missing primary key field: ${field}`);
+    }
+    values[field] = val;
+  }
+  return values;
+}
+
 export function validateJsonPath(path: string[]): string[] {
   for (const segment of path) {
     if (!JSON_PATH_SEGMENT.test(segment)) {
@@ -45,77 +53,15 @@ export function validateJsonPath(path: string[]): string[] {
   return path;
 }
 
-export function extractEqualityWhere<T>(where: WhereWithoutPath<T>): Map<string, unknown> {
-  const values = new Map<string, unknown>();
-
-  const visit = (clause: WhereWithoutPath<T>): void => {
-    if ("and" in clause) {
-      for (const child of clause.and) {
-        visit(child);
-      }
-      return;
-    }
-
-    if ("or" in clause) {
-      // Upsert needs one deterministic conflict key. Allowing OR conditions would
-      // make the conflict target ambiguous across all adapters, not just SQL ones.
-      throw new Error("Upsert 'where' clause does not support 'or' conditions.");
-    }
-
-    if (clause.path !== undefined) {
-      // Path-based filters are query semantics, not stable identity semantics.
-      // Keeping them out of upsert avoids backend-specific conflict behavior.
-      throw new Error("Upsert 'where' clause does not support JSON paths.");
-    }
-
-    if (clause.op !== "eq") {
-      // v1 upsert is intentionally conservative: equality on identity fields only.
-      throw new Error("Upsert 'where' clause only supports 'eq' conditions.");
-    }
-
-    const existing = values.get(clause.field);
-    if (existing !== undefined && existing !== clause.value) {
-      throw new Error(`Conflicting upsert values for field ${clause.field}.`);
-    }
-    values.set(clause.field, clause.value);
-  };
-
-  visit(where);
-  return values;
-}
-
-export function getPrimaryKeyWhereValues<T>(
-  model: Model,
-  where: WhereWithoutPath<T>,
-): Record<string, unknown> {
-  const equalityWhere = extractEqualityWhere(where);
-  const pkFields = getPrimaryKeyFields(model);
-  const values: Record<string, unknown> = {};
-
-  if (equalityWhere.size !== pkFields.length) {
-    // We currently support primary-key based upserts only. This keeps the same
-    // rule across memory, SQLite, and Postgres instead of inventing per-backend
-    // uniqueness semantics in v1.
-    throw new Error("Upsert requires equality filters for every primary key field.");
-  }
-
-  for (const field of pkFields) {
-    if (!equalityWhere.has(field)) {
-      throw new Error("Upsert requires equality filters for every primary key field.");
-    }
-    values[field] = equalityWhere.get(field);
-  }
-
-  return values;
-}
-
-export function buildPrimaryKeyWhere<T extends Record<string, unknown>>(
+/**
+ * Builds a 'Where' filter targeting the primary key of a specific record.
+ */
+export function buildIdentityFilter<T extends Record<string, unknown>>(
   model: Model,
   source: Record<string, unknown>,
 ): Where<T> {
   const pkFields = getPrimaryKeyFields(model);
   const clauses = pkFields.map((field) => ({
-    // The schema is the source of truth for valid field names here.
     // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
     field: field as FieldName<T>,
     op: "eq" as const,

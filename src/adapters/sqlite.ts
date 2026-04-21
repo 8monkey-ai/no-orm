@@ -7,14 +7,13 @@ import type {
   Select,
   SortBy,
   Where,
-  WhereWithoutPath,
 } from "../types";
 import {
   assertNoPrimaryKeyUpdates,
-  buildPrimaryKeyWhere,
+  buildIdentityFilter,
   escapeLiteral,
+  getIdentityValues,
   getPrimaryKeyFields,
-  getPrimaryKeyWhereValues,
   isRecord,
   mapNumeric,
   quote,
@@ -139,7 +138,7 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
 
     const result = await this.find<K, T>({
       model,
-      where: buildPrimaryKeyWhere(modelSpec, data),
+      where: buildIdentityFilter(modelSpec, data),
       select,
     });
 
@@ -227,7 +226,7 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
 
     const assignments = fields.map((field) => `${quote(field)} = ?`).join(", ");
     const params = fields.map((field) => mappedData[field] ?? null);
-    const primaryKeyWhere: Where<T> = buildPrimaryKeyWhere(modelSpec, existing);
+    const primaryKeyWhere: Where<T> = buildIdentityFilter(modelSpec, existing);
     const builtWhere = this.buildWhere(model, primaryKeyWhere);
 
     await this.db.run(`UPDATE ${quote(model)} SET ${assignments} WHERE ${builtWhere.sql}`, [
@@ -271,14 +270,14 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: {
     model: K;
-    where: WhereWithoutPath<T>;
     create: T;
     update: Partial<T>;
+    where?: Where<T>;
     select?: Select<T>;
   }): Promise<T> {
-    const { model, where, create, update, select } = args;
+    const { model, create, update, where, select } = args;
     const modelSpec = this.getModel(model);
-    const primaryKeyValues = getPrimaryKeyWhereValues(modelSpec, where);
+    const identityValues = getIdentityValues(modelSpec, create);
     assertNoPrimaryKeyUpdates(modelSpec, update);
 
     const mappedCreate = this.mapInput(modelSpec.fields, create);
@@ -290,11 +289,10 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
     const conflictColumns = primaryKeyFields.map((field) => quote(field)).join(", ");
     const insertColumns = createFields.map((field) => quote(field)).join(", ");
     const insertPlaceholders = createFields.map(() => "?").join(", ");
-    const updateClause =
+
+    let updateClause =
       updateFields.length > 0
-        ? // SQLite has no generic "merge this object" primitive, so we spell out
-          // the UPDATE clause and bind update values explicitly.
-          updateFields.map((field) => `${quote(field)} = ?`).join(", ")
+        ? updateFields.map((field) => `${quote(field)} = ?`).join(", ")
         : `${quote(primaryKeyFields[0]!)} = excluded.${quote(primaryKeyFields[0]!)}`;
 
     const params =
@@ -305,6 +303,12 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
           ]
         : createFields.map((field) => mappedCreate[field] ?? null);
 
+    if (where !== undefined) {
+      const builtWhere = this.buildWhere(model, where);
+      updateClause += ` WHERE ${builtWhere.sql}`;
+      params.push(...builtWhere.params);
+    }
+
     await this.db.run(
       `INSERT INTO ${quote(model)} (${insertColumns}) VALUES (${insertPlaceholders}) ON CONFLICT(${conflictColumns}) DO UPDATE SET ${updateClause}`,
       params,
@@ -312,7 +316,7 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
 
     const result = await this.find<K, T>({
       model,
-      where: buildPrimaryKeyWhere(modelSpec, primaryKeyValues),
+      where: buildIdentityFilter(modelSpec, identityValues),
       select,
     });
 
@@ -333,7 +337,7 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
 
     const builtWhere = this.buildWhere(
       args.model,
-      buildPrimaryKeyWhere(this.getModel(args.model), existing),
+      buildIdentityFilter(this.getModel(args.model), existing),
     );
     await this.db.run(
       `DELETE FROM ${quote(args.model)} WHERE ${builtWhere.sql}`,

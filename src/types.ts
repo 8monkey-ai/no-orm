@@ -78,9 +78,9 @@ export interface Adapter<S extends Schema = Schema> {
 
   upsert?<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
     model: K;
-    where: WhereWithoutPath<T>;
     create: T;
     update: Partial<T>;
+    where?: Where<T>;
     select?: Select<T>;
   }): Promise<T>;
 
@@ -141,28 +141,6 @@ export type Where<T = Record<string, unknown>> =
     }
   | {
       or: Where<T>[];
-    };
-
-export type WhereWithoutPath<T = Record<string, unknown>> =
-  | {
-      field: FieldName<T>;
-      op: "eq" | "ne" | "gt" | "gte" | "lt" | "lte";
-      value: unknown;
-      path?: never;
-    }
-  | {
-      field: FieldName<T>;
-      op: "in" | "not_in";
-      value: unknown[];
-      path?: never;
-    }
-  | {
-      and: WhereWithoutPath<T>[];
-      path?: never;
-    }
-  | {
-      or: WhereWithoutPath<T>[];
-      path?: never;
     };
 
 export interface SortBy<T = Record<string, unknown>> {

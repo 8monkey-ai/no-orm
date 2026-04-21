@@ -178,22 +178,96 @@ describe("MemoryAdapter", () => {
     expect(results).toHaveLength(2);
   });
 
-  it("should require primary-key equality in upsert filters", () => {
-    const userData: User = {
-      id: "u1",
-      name: "Alice",
-      age: 25,
-      is_active: true,
-      metadata: null,
-    };
+  describe("Upsert", () => {
+    it("should handle upsert correctly (insert and update)", async () => {
+      const userData: User = {
+        id: "u1",
+        name: "Alice",
+        age: 25,
+        is_active: true,
+        metadata: null,
+      };
 
-    expect(() =>
-      adapter.upsert<"users", User>({
+      // 1. Insert because it doesn't exist
+      await adapter.upsert<"users", User>({
         model: "users",
-        where: { field: "name", op: "eq", value: "Alice" },
         create: userData,
-        update: { age: 26 },
-      }),
-    ).toThrow("Upsert requires equality filters for every primary key field.");
+        update: { age: 30 },
+      });
+
+      let found = await adapter.find<"users", User>({
+        model: "users",
+        where: { field: "id", op: "eq", value: "u1" },
+      });
+      expect(found?.age).toBe(25); // Should have used 'create' data
+
+      // 2. Update because it exists
+      await adapter.upsert<"users", User>({
+        model: "users",
+        create: userData,
+        update: { age: 31 },
+      });
+
+      found = await adapter.find<"users", User>({
+        model: "users",
+        where: { field: "id", op: "eq", value: "u1" },
+      });
+      expect(found?.age).toBe(31); // Should have used 'update' data
+    });
+
+    it("should support predicated upsert", async () => {
+      const userData: User = {
+        id: "u1",
+        name: "Alice",
+        age: 25,
+        is_active: true,
+        metadata: null,
+      };
+
+      await adapter.create({ model: "users", data: userData });
+
+      // Condition fails, no update
+      await adapter.upsert<"users", User>({
+        model: "users",
+        create: userData,
+        update: { age: 30 },
+        where: { field: "age", op: "gt", value: 40 },
+      });
+
+      let found = await adapter.find<"users", User>({
+        model: "users",
+        where: { field: "id", op: "eq", value: "u1" },
+      });
+      expect(found?.age).toBe(25);
+
+      // Condition passes, update happens
+      await adapter.upsert<"users", User>({
+        model: "users",
+        create: userData,
+        update: { age: 30 },
+        where: { field: "age", op: "lt", value: 40 },
+      });
+
+      found = await adapter.find<"users", User>({
+        model: "users",
+        where: { field: "id", op: "eq", value: "u1" },
+      });
+      expect(found?.age).toBe(30);
+    });
+
+    it("should throw error if primary key is missing in 'create' data", async () => {
+      const invalidData = {
+        name: "Missing ID",
+        age: 20,
+      } as any;
+
+      expect(() =>
+        adapter.upsert({
+          model: "users",
+          create: invalidData,
+          update: { age: 21 },
+        }),
+      ).toThrow("Missing primary key field: id");
+    });
   });
 });

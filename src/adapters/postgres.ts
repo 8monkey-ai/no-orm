@@ -9,14 +9,13 @@ import type {
   Select,
   SortBy,
   Where,
-  WhereWithoutPath,
 } from "../types";
 import {
   assertNoPrimaryKeyUpdates,
-  buildPrimaryKeyWhere,
+  buildIdentityFilter,
   escapeLiteral,
+  getIdentityValues,
   getPrimaryKeyFields,
-  getPrimaryKeyWhereValues,
   isRecord,
   mapNumeric,
   quote,
@@ -204,14 +203,14 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: {
     model: K;
-    where: WhereWithoutPath<T>;
     create: T;
     update: Partial<T>;
+    where?: Where<T>;
     select?: Select<T>;
   }): Promise<T> {
-    const { model, where, create, update, select } = args;
+    const { model, create, update, where, select } = args;
     const modelSpec = this.getModel(model);
-    const pkValues = getPrimaryKeyWhereValues(modelSpec, where);
+    const identityValues = getIdentityValues(modelSpec, create);
     assertNoPrimaryKeyUpdates(modelSpec, update);
 
     const createData = this.mapInput(modelSpec.fields, create);
@@ -224,7 +223,7 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
     const insertPlaceholders = createFields.map((_, index) => `$${index + 1}`).join(", ");
     const conflictTarget = pkFields.map((field) => quote(field)).join(", ");
 
-    const updateClause =
+    let updateClause =
       updateFields.length > 0
         ? updateFields
             .map(
@@ -239,6 +238,12 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
         ? [...insertValues, ...updateFields.map((field) => updateData[field])]
         : insertValues;
 
+    if (where !== undefined) {
+      const builtWhere = this.buildWhere(model, where, undefined, undefined, params.length + 1);
+      updateClause += ` WHERE ${builtWhere.sql}`;
+      params.push(...builtWhere.params);
+    }
+
     const sql = `INSERT INTO ${quote(model)} (${createFields.map((field) => quote(field)).join(", ")}) VALUES (${insertPlaceholders}) ON CONFLICT (${conflictTarget}) DO UPDATE SET ${updateClause} RETURNING ${this.buildSelect(select)}`;
     const rows = await this.query(sql, params);
     const row = rows[0];
@@ -249,7 +254,7 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
 
     const existing = await this.find<K, T>({
       model,
-      where: buildPrimaryKeyWhere(modelSpec, pkValues),
+      where: buildIdentityFilter(modelSpec, identityValues),
       select,
     });
     if (existing === null) {
@@ -269,7 +274,7 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
 
     const builtWhere = this.buildWhere(
       args.model,
-      buildPrimaryKeyWhere(this.getModel(args.model), existing),
+      buildIdentityFilter(this.getModel(args.model), existing),
     );
     await this.query(`DELETE FROM ${quote(args.model)} WHERE ${builtWhere.sql}`, builtWhere.params);
   }

@@ -404,7 +404,6 @@ describe("SqliteAdapter", () => {
       // Insert
       await adapter.upsert<"users", User>({
         model: "users",
-        where: { field: "id", op: "eq", value: "u1" },
         create: data,
         update: { age: 26 },
       });
@@ -418,7 +417,6 @@ describe("SqliteAdapter", () => {
       // Update
       await adapter.upsert<"users", User>({
         model: "users",
-        where: { field: "id", op: "eq", value: "u1" },
         create: data,
         update: { age: 26 },
       });
@@ -430,7 +428,7 @@ describe("SqliteAdapter", () => {
       expect(found?.age).toBe(26);
     });
 
-    it("should require primary-key equality in upsert filters", () => {
+    it("should handle predicated upsert", async () => {
       const data: User = {
         id: "u1",
         name: "Alice",
@@ -440,14 +438,35 @@ describe("SqliteAdapter", () => {
         tags: null,
       };
 
-      expect(() =>
-        adapter.upsert<"users", User>({
-          model: "users",
-          where: { field: "name", op: "eq", value: "Alice" },
-          create: data,
-          update: { age: 26 },
-        }),
-      ).toThrow("Upsert requires equality filters for every primary key field.");
+      await adapter.create({ model: "users", data });
+
+      // Update should NOT happen if where condition is false
+      await adapter.upsert<"users", User>({
+        model: "users",
+        create: data,
+        update: { age: 30 },
+        where: { field: "age", op: "gt", value: 50 },
+      });
+
+      let found = await adapter.find<"users", User>({
+        model: "users",
+        where: { field: "id", op: "eq", value: "u1" },
+      });
+      expect(found?.age).toBe(25);
+
+      // Update SHOULD happen if where condition is true
+      await adapter.upsert<"users", User>({
+        model: "users",
+        create: data,
+        update: { age: 30 },
+        where: { field: "age", op: "lt", value: 50 },
+      });
+
+      found = await adapter.find<"users", User>({
+        model: "users",
+        where: { field: "id", op: "eq", value: "u1" },
+      });
+      expect(found?.age).toBe(30);
     });
   });
 });
