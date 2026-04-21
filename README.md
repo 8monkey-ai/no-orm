@@ -76,9 +76,10 @@ const adapter = new MemoryAdapter(schema);
 await adapter.migrate({ schema });
 ```
 
-## Basic Operations
+## CRUD
 
 ```ts
+// Create
 const created = await adapter.create<"users", User>({
   model: "users",
   data: {
@@ -92,22 +93,76 @@ const created = await adapter.create<"users", User>({
   },
 });
 
+// Find one
 const found = await adapter.find<"users", User>({
   model: "users",
   where: { field: "id", op: "eq", value: "u1" },
 });
 
-const recentUsers = await adapter.findMany<"users", User>({
+// Find many
+const users = await adapter.findMany<"users", User>({
   model: "users",
   where: { field: "is_active", op: "eq", value: true },
   sortBy: [{ field: "created_at", direction: "desc" }],
   limit: 20,
 });
+
+// Update
+const updated = await adapter.update<"users", User>({
+  model: "users",
+  where: { field: "id", op: "eq", value: "u1" },
+  data: { age: 31 },
+});
+
+// Delete
+await adapter.delete<"users", User>({
+  model: "users",
+  where: { field: "id", op: "eq", value: "u1" },
+});
+
+// Count
+const total = await adapter.count<"users", User>({
+  model: "users",
+  where: { field: "is_active", op: "eq", value: true },
+});
+
+// Upsert - insert or update by primary key
+const user = await adapter.upsert<"users", User>({
+  model: "users",
+  create: { id: "u1", name: "Alice", age: 30, is_active: true, created_at: Date.now() },
+  update: { age: 31 },
+  // Optional: only update if predicate is met
+  where: { field: "is_active", op: "eq", value: true },
+});
 ```
 
-## JSON Path Filters
+## Filtering
 
-Nested JSON filters use the base field plus a `path` array:
+All operations accept a `where` clause:
+
+```ts
+// Operators
+where: { field: "age", op: "eq", value: 30 }
+where: { field: "age", op: "ne", value: null }
+where: { field: "age", op: "gt", value: 18 }
+where: { field: "age", op: "gte", value: 18 }
+where: { field: "age", op: "lt", value: 65 }
+where: { field: "age", op: "lte", value: 65 }
+where: { field: "status", op: "in", value: ["active", "pending"] }
+where: { field: "status", op: "not_in", value: ["banned"] }
+
+// Combine with and/or
+where: {
+  and: [
+    { field: "age", op: "gte", value: 18 },
+    { field: "is_active", op: "eq", value: true },
+  ],
+}
+```
+
+## JSON Paths
+
+Filter nested JSON fields using `path`:
 
 ```ts
 const darkUsers = await adapter.findMany<"users", User>({
@@ -121,8 +176,27 @@ const darkUsers = await adapter.findMany<"users", User>({
 });
 ```
 
-Path segments are intentionally restricted to simple identifiers so adapters can
-compile them safely for each backend.
+## Pagination
+
+```ts
+// Offset pagination
+const page = await adapter.findMany<"users", User>({
+  model: "users",
+  sortBy: [{ field: "created_at", direction: "desc" }],
+  limit: 20,
+  offset: 40,
+});
+
+// Cursor pagination (keyset)
+const cursorPage = await adapter.findMany<"users", User>({
+  model: "users",
+  sortBy: [{ field: "created_at", direction: "desc" }],
+  limit: 20,
+  cursor: {
+    after: { created_at: 1699900000000, id: "u20" },
+  },
+});
+```
 
 ## Transactions
 
@@ -130,15 +204,7 @@ compile them safely for each backend.
 await adapter.transaction(async (tx) => {
   await tx.create({
     model: "users",
-    data: {
-      id: "u2",
-      name: "Bob",
-      age: 28,
-      is_active: true,
-      metadata: null,
-      tags: null,
-      created_at: Date.now(),
-    },
+    data: { id: "u2", name: "Bob", age: 28, is_active: true, created_at: Date.now() },
   });
 
   await tx.update({
@@ -149,15 +215,15 @@ await adapter.transaction(async (tx) => {
 });
 ```
 
-SQLite and Postgres both support nested transactions through savepoints.
+SQLite and Postgres support nested transactions via savepoints.
 
 ## Notes
 
-- `upsert` in v1 always conflicts on the **Primary Key**. Identity is inferred automatically from the `create` data.
-- The optional `where` clause in `upsert` acts as a **predicate** for the update: the record is only updated if the condition is met.
-- Primary-key updates are rejected to keep adapter behavior simple and consistent across backends.
-- SQLite stores JSON as text; Postgres stores JSON as `jsonb`.
-- **Numeric Precision**: `number` and `timestamp` fields use standard JavaScript `Number`. `bigint` is intentionally not supported in v1 to keep the core and adapters tiny.
+- `upsert` always conflicts on the Primary Key
+- Optional `where` in `upsert` acts as a predicate — record is only updated if condition is met
+- Primary-key updates are rejected to keep adapter behavior consistent
+- SQLite stores JSON as text; Postgres stores JSON as `jsonb`
+- `number` and `timestamp` use standard JavaScript `Number`. `bigint` is not supported in v1.
 
 ## License
 
