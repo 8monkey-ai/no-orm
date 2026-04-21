@@ -1,15 +1,6 @@
 import type { SQL, TransactionSQL } from "bun";
 
-import type {
-  Adapter,
-  Cursor,
-  Field,
-  InferModel,
-  Schema,
-  Select,
-  SortBy,
-  Where,
-} from "../types";
+import type { Adapter, Cursor, Field, InferModel, Schema, Select, SortBy, Where } from "../types";
 import {
   assertNoPrimaryKeyUpdates,
   buildIdentityFilter,

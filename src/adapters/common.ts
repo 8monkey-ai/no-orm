@@ -31,7 +31,10 @@ export function getPrimaryKeyFields(model: Model): string[] {
 /**
  * Extracts primary key values from a data object based on the model schema.
  */
-export function getIdentityValues(model: Model, data: Record<string, unknown>): Record<string, unknown> {
+export function getIdentityValues(
+  model: Model,
+  data: Record<string, unknown>,
+): Record<string, unknown> {
   const pkFields = getPrimaryKeyFields(model);
   const values: Record<string, unknown> = {};
   for (const field of pkFields) {
@@ -61,12 +64,16 @@ export function buildIdentityFilter<T extends Record<string, unknown>>(
   source: Record<string, unknown>,
 ): Where<T> {
   const pkFields = getPrimaryKeyFields(model);
-  const clauses = pkFields.map((field) => ({
-    // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
-    field: field as FieldName<T>,
-    op: "eq" as const,
-    value: source[field],
-  }));
+  const clauses = pkFields.map((field) => {
+    // field is string from getPrimaryKeyFields, narrowing to FieldName<T> is safe
+    const fieldName = field as FieldName<T>; // eslint-disable-line @typescript-eslint/no-unsafe-type-assertion
+    const leaf: Where<T> = {
+      field: fieldName,
+      op: "eq" as const,
+      value: source[field],
+    };
+    return leaf;
+  });
 
   if (clauses.length === 1) {
     return clauses[0]!;

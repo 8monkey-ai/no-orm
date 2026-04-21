@@ -255,11 +255,12 @@ describe("MemoryAdapter", () => {
       expect(found?.age).toBe(30);
     });
 
-    it("should throw error if primary key is missing in 'create' data", async () => {
+    it("should throw error if primary key is missing in 'create' data", () => {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
       const invalidData = {
         name: "Missing ID",
         age: 20,
-      } as any;
+      } as unknown as User;
 
       expect(() =>
         adapter.upsert({
@@ -269,5 +270,65 @@ describe("MemoryAdapter", () => {
         }),
       ).toThrow("Missing primary key field: id");
     });
+  });
+
+  it("should sort records with null values", async () => {
+    await adapter.create({
+      model: "users",
+      data: { id: "u1", name: "Alice", age: 25, is_active: true, metadata: { theme: "dark" } },
+    });
+    await adapter.create({
+      model: "users",
+      data: { id: "u2", name: "Bob", age: 30, is_active: true, metadata: null },
+    });
+
+    const results = await adapter.findMany({
+      model: "users",
+      sortBy: [{ field: "metadata", direction: "asc" }],
+    });
+
+    expect(results).toHaveLength(2);
+    expect(results[0]?.["id"]).toBe("u2"); // null should come first in asc
+    expect(results[1]?.["id"]).toBe("u1");
+  });
+
+  it("should support keyset pagination", async () => {
+    await adapter.create({
+      model: "users",
+      data: { id: "u1", name: "Alice", age: 20, is_active: true, metadata: null },
+    });
+    await adapter.create({
+      model: "users",
+      data: { id: "u2", name: "Bob", age: 20, is_active: true, metadata: null },
+    });
+    await adapter.create({
+      model: "users",
+      data: { id: "u3", name: "Charlie", age: 30, is_active: true, metadata: null },
+    });
+
+    // Page 1
+    const p1 = await adapter.findMany({
+      model: "users",
+      sortBy: [
+        { field: "age", direction: "asc" },
+        { field: "id", direction: "asc" },
+      ],
+      limit: 2,
+    });
+    expect(p1).toHaveLength(2);
+    expect(p1[0]?.["id"]).toBe("u1");
+    expect(p1[1]?.["id"]).toBe("u2");
+
+    // Page 2
+    const p2 = await adapter.findMany({
+      model: "users",
+      sortBy: [
+        { field: "age", direction: "asc" },
+        { field: "id", direction: "asc" },
+      ],
+      cursor: { after: { age: 20, id: "u2" } },
+    });
+    expect(p2).toHaveLength(1);
+    expect(p2[0]?.["id"]).toBe("u3");
   });
 });
