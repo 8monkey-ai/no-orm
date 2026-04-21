@@ -32,46 +32,57 @@ interface BunSQL {
   transaction<T>(fn: (tx: BunSQL) => Promise<T>): Promise<T>;
 }
 
+function isBunSQL(obj: unknown): obj is BunSQL {
+  return objIsObject(obj) && "unsafe" in obj && typeof obj["unsafe"] === "function";
+}
+
+function isPgPool(obj: unknown): obj is PgPool {
+  return objIsObject(obj) && "connect" in obj && typeof obj["connect"] === "function";
+}
+
+function isPgClient(obj: unknown): obj is PgClient {
+  return (
+    objIsObject(obj) && "query" in obj && typeof obj["query"] === "function" && "release" in obj
+  );
+}
+
+function objIsObject(obj: unknown): obj is Record<string, unknown> {
+  return obj !== null && typeof obj === "object";
+}
+
 /**
  * Standardized way to wrap various Postgres drivers.
  * All driver-specific logic is localized here.
  */
 function createExecutor(driver: PostgresDriver): PostgresExecutor {
   // Bun SQL Sniffing
-  if ("unsafe" in driver && typeof driver.unsafe === "function") {
-    // Duck-typing check: runtime inspection cannot narrow TypeScript union types
-    // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
-    const sql = driver as BunSQL;
+  if (isBunSQL(driver)) {
+    const sql = driver;
     return {
-      query: async (querySql: string, params: unknown[]) => {
-        // Bun's unsafe returns Promise<unknown>, cast to any[] for executor compatibility
-        // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion, typescript-eslint/no-unsafe-return, typescript-eslint/no-unnecessary-type-assertion
-        return (await sql.unsafe(querySql, params)) as Record<string, unknown>[];
+      query: async (querySql, params) => {
+        const rows = await sql.unsafe<Record<string, unknown>[]>(querySql, params);
+        return rows;
       },
       transaction: (fn) => {
-        // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
         return sql.transaction((tx) => fn(createExecutor(tx as PostgresDriver)));
       },
     };
   }
 
   // pg Pool Sniffing
-  if ("connect" in driver && typeof driver.connect === "function") {
-    // Duck-typing check: runtime inspection cannot narrow TypeScript union types
-    // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
-    const pool = driver as PgPool;
+  if (isPgPool(driver)) {
+    const pool = driver;
     return {
       query: async (querySql: string, params: unknown[]) => {
         const result = await pool.query(querySql, params);
         // pg's result.rows is any[], cast to proper type
-        // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion, typescript-eslint/no-unsafe-return
+        // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
         return result.rows as Record<string, unknown>[];
       },
       transaction: async (fn) => {
         const client = await pool.connect();
         try {
           await client.query("BEGIN");
-          // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
           const result = await fn(createExecutor(client as PostgresDriver));
           await client.query("COMMIT");
           return result;
@@ -86,15 +97,13 @@ function createExecutor(driver: PostgresDriver): PostgresExecutor {
   }
 
   // pg Client / PoolClient Sniffing
-  if ("query" in driver && typeof driver.query === "function") {
-    // Duck-typing check: runtime inspection cannot narrow TypeScript union types
-    // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
-    const client = driver as PgClient | PgPoolClient;
+  if (isPgClient(driver)) {
+    const client = driver;
     return {
       query: async (querySql: string, params: unknown[]) => {
         const result = await client.query(querySql, params);
         // pg's result.rows is any[], cast to proper type
-        // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion, typescript-eslint/no-unsafe-return
+        // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
         return result.rows as Record<string, unknown>[];
       },
       transaction: async (fn) => {

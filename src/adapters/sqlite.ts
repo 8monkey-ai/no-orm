@@ -49,19 +49,13 @@ interface SyncDriver {
  */
 function createExecutor(driver: SqliteDriver): SqliteExecutor {
   // If it's already an executor, return it
-  if (objIsObject(driver) && "run" in driver && "get" in driver && "all" in driver) {
-    // Already implements SqliteExecutor interface
-    // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
-    return driver as SqliteExecutor;
+  if (isSqliteExecutor(driver)) {
+    return driver;
   }
 
   // Sniff for Sync Drivers (Bun or Better-Sqlite3)
-  const isSync = checkIsSyncDriver(driver);
-
-  if (isSync) {
-    // Duck-typing check: runtime inspection cannot narrow TypeScript union types
-    // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
-    const syncDb = driver as SyncDriver;
+  if (isSyncDriver(driver)) {
+    const syncDb = driver as SyncDriver & (BunDatabase | BetterSqlite3Database);
     return {
       run: (sql, params) => {
         const stmt = syncDb.prepare(sql);
@@ -89,6 +83,7 @@ function createExecutor(driver: SqliteDriver): SqliteExecutor {
   }
 
   // Otherwise assume it matches SqliteDatabase (async sqlite driver)
+  // Intentional assertion: ruled out executor and sync driver, remaining union member is SqliteDatabase
   // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
   return driver as SqliteExecutor;
 }
@@ -97,14 +92,21 @@ function objIsObject(obj: unknown): obj is Record<string, unknown> {
   return obj !== null && typeof obj === "object";
 }
 
-function checkIsSyncDriver(obj: unknown): boolean {
+function isSqliteExecutor(obj: unknown): obj is SqliteExecutor {
+  return objIsObject(obj) && "run" in obj && "get" in obj && "all" in obj;
+}
+
+function hasNonAsyncGetter(obj: Record<string, unknown>): boolean {
+  // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
+  const getFn = obj["get"] as { constructor: { name: string } };
+  return getFn.constructor.name !== "AsyncFunction";
+}
+
+function isSyncDriver(obj: unknown): obj is SyncDriver {
   if (!objIsObject(obj)) return false;
   if (!("prepare" in obj) || typeof obj["prepare"] !== "function") return false;
-  const hasAsyncGet = "get" in obj && typeof obj["get"] === "function";
-  if (hasAsyncGet) {
-    // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
-    const getFn = obj["get"] as { constructor: { name: string } };
-    return getFn.constructor.name !== "AsyncFunction";
+  if ("get" in obj && typeof obj["get"] === "function") {
+    return hasNonAsyncGetter(obj);
   }
   return true;
 }
