@@ -55,7 +55,6 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
       throw new Error(`Record with primary key ${pkValue} already exists in ${model}`);
     }
 
-    // Optimization: Avoid object spread in hot path
     const record = Object.assign({}, data);
     modelStorage.set(pkValue, record);
 
@@ -169,7 +168,6 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     for (const [pk, record] of modelStorage.entries()) {
       const modelRecord = this.asModel<T>(record);
       if (this.evaluateWhere(where, modelRecord)) {
-        // Optimization: Create a new object to avoid mutating internal storage reference
         const updated = Object.assign({}, modelRecord, data);
         modelStorage.set(pk, updated);
         return Promise.resolve(this.applySelect(this.asModel(updated)));
@@ -192,7 +190,6 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     for (const [pk, record] of modelStorage.entries()) {
       const modelRecord = this.asModel<T>(record);
       if (where === undefined || this.evaluateWhere(where, modelRecord)) {
-        // Optimization: Create a new object to avoid mutating internal storage reference
         const updated = Object.assign({}, modelRecord, data);
         modelStorage.set(pk, updated);
         count++;
@@ -335,7 +332,11 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     return result;
   }
 
-  private setField<T extends RowData, K extends FieldName<T>>(obj: T, key: K, value: unknown): void {
+  private setField<T extends RowData, K extends FieldName<T>>(
+    obj: T,
+    key: K,
+    value: unknown,
+  ): void {
     // Value is either from the record or defaulted to null - both are valid for T[K]
     obj[key] = value as T[K]; // eslint-disable-line @typescript-eslint/no-unsafe-type-assertion
   }

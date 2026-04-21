@@ -1,4 +1,5 @@
-import type { SQL, TransactionSQL } from "bun";
+import type { SQL } from "bun";
+import type { Client as PgClient, Pool as PgPool, PoolClient as PgPoolClient } from "pg";
 
 import type { Adapter, Cursor, Field, InferModel, Schema, Select, SortBy, Where } from "../types";
 import {
@@ -13,15 +14,116 @@ import {
   validateJsonPath,
 } from "./common";
 
-function supportsSavepoints(sql: SQL): sql is TransactionSQL {
-  return "savepoint" in sql;
+/**
+ * Internal interface to abstract away the differences between pg and Bun SQL.
+ */
+interface PostgresExecutor {
+  query(sql: string, params: unknown[]): Promise<Record<string, unknown>[]>;
+  transaction<T>(fn: (executor: PostgresExecutor) => Promise<T>): Promise<T>;
+}
+
+export type PostgresDriver = SQL | PgClient | PgPool | PgPoolClient;
+
+/**
+ * Internal interface for Bun SQL.
+ */
+interface BunSQL {
+  unsafe<T>(sql: string, params?: unknown[]): Promise<T>;
+  transaction<T>(fn: (tx: BunSQL) => Promise<T>): Promise<T>;
+}
+
+/**
+ * Standardized way to wrap various Postgres drivers.
+ * All driver-specific logic is localized here.
+ */
+function createExecutor(driver: PostgresDriver): PostgresExecutor {
+  // Bun SQL Sniffing
+  if ("unsafe" in driver && typeof driver.unsafe === "function") {
+    // Duck-typing check: runtime inspection cannot narrow TypeScript union types
+    // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
+    const sql = driver as BunSQL;
+    return {
+      query: async (querySql: string, params: unknown[]) => {
+        // Bun's unsafe returns Promise<unknown>, cast to any[] for executor compatibility
+        // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion, typescript-eslint/no-unsafe-return, typescript-eslint/no-unnecessary-type-assertion
+        return (await sql.unsafe(querySql, params)) as Record<string, unknown>[];
+      },
+      transaction: (fn) => {
+        // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
+        return sql.transaction((tx) => fn(createExecutor(tx as PostgresDriver)));
+      },
+    };
+  }
+
+  // pg Pool Sniffing
+  if ("connect" in driver && typeof driver.connect === "function") {
+    // Duck-typing check: runtime inspection cannot narrow TypeScript union types
+    // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
+    const pool = driver as PgPool;
+    return {
+      query: async (querySql: string, params: unknown[]) => {
+        const result = await pool.query(querySql, params);
+        // pg's result.rows is any[], cast to proper type
+        // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion, typescript-eslint/no-unsafe-return
+        return result.rows as Record<string, unknown>[];
+      },
+      transaction: async (fn) => {
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
+          const result = await fn(createExecutor(client as PostgresDriver));
+          await client.query("COMMIT");
+          return result;
+        } catch (e) {
+          await client.query("ROLLBACK");
+          throw e;
+        } finally {
+          client.release();
+        }
+      },
+    };
+  }
+
+  // pg Client / PoolClient Sniffing
+  if ("query" in driver && typeof driver.query === "function") {
+    // Duck-typing check: runtime inspection cannot narrow TypeScript union types
+    // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
+    const client = driver as PgClient | PgPoolClient;
+    return {
+      query: async (querySql: string, params: unknown[]) => {
+        const result = await client.query(querySql, params);
+        // pg's result.rows is any[], cast to proper type
+        // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion, typescript-eslint/no-unsafe-return
+        return result.rows as Record<string, unknown>[];
+      },
+      transaction: async (fn) => {
+        await client.query("BEGIN");
+        try {
+          // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
+          const result = await fn(createExecutor(client as PostgresDriver));
+          await client.query("COMMIT");
+          return result;
+        } catch (e) {
+          await client.query("ROLLBACK");
+          throw e;
+        }
+      },
+    };
+  }
+
+  throw new Error("Unsupported Postgres driver.");
 }
 
 export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
+  private executor: PostgresExecutor;
+
   constructor(
     private schema: S,
-    private sql: SQL,
-  ) {}
+    driver: PostgresDriver,
+  ) {
+    this.executor = createExecutor(driver);
+  }
 
   async migrate(): Promise<void> {
     for (const [name, model] of Object.entries(this.schema)) {
@@ -34,11 +136,10 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
         .map((field) => quote(field))
         .join(", ")})`;
 
-      // Postgres can run these one by one without much ceremony, which keeps the
-      // bootstrap logic easy to read and debug.
       // oxlint-disable-next-line eslint/no-await-in-loop
-      await this.sql.unsafe(
+      await this.executor.query(
         `CREATE TABLE IF NOT EXISTS ${quote(name)} (${columns.join(", ")}, ${pk})`,
+        [],
       );
 
       if (model.indexes === undefined) continue;
@@ -52,8 +153,9 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
           .join(", ");
 
         // oxlint-disable-next-line eslint/no-await-in-loop
-        await this.sql.unsafe(
+        await this.executor.query(
           `CREATE INDEX IF NOT EXISTS ${quote(`idx_${name}_${i}`)} ON ${quote(name)} (${fields})`,
+          [],
         );
       }
     }
@@ -71,7 +173,7 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
     const placeholders = fields.map((_, index) => `$${index + 1}`).join(", ");
     const sql = `INSERT INTO ${quote(model)} (${fields.map((field) => quote(field)).join(", ")}) VALUES (${placeholders}) RETURNING ${this.buildSelect(select)}`;
 
-    const rows = await this.query(sql, values);
+    const rows = await this.executor.query(sql, values);
     const row = rows[0];
     if (row === undefined) {
       throw new Error("Failed to create record.");
@@ -86,7 +188,7 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
     const { model, where, select } = args;
     const builtWhere = this.buildWhere(model, where);
     const sql = `SELECT ${this.buildSelect(select)} FROM ${quote(model)} WHERE ${builtWhere.sql} LIMIT 1`;
-    const rows = await this.query(sql, builtWhere.params);
+    const rows = await this.executor.query(sql, builtWhere.params);
     const row = rows[0];
     return row === undefined ? null : this.mapRow(model, row, select);
   }
@@ -134,7 +236,7 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
       params.push(offset);
     }
 
-    const rows = await this.query(parts.join(" "), params);
+    const rows = await this.executor.query(parts.join(" "), params);
     return rows.map((row) => this.mapRow(model, row, select));
   }
 
@@ -156,7 +258,7 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
     const builtWhere = this.buildWhere(model, where, undefined, undefined, fields.length + 1);
     const sql = `UPDATE ${quote(model)} SET ${assignments} WHERE ${builtWhere.sql} RETURNING *`;
     const values = [...fields.map((field) => updateData[field]), ...builtWhere.params];
-    const rows = await this.query(sql, values);
+    const rows = await this.executor.query(sql, values);
     const row = rows[0];
     return row === undefined ? null : this.mapRow(model, row);
   }
@@ -185,7 +287,7 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
       params.push(...builtWhere.params);
     }
 
-    const rows = await this.query(`${sql} RETURNING 1 as touched`, params);
+    const rows = await this.executor.query(`${sql} RETURNING 1 as touched`, params);
     return rows.length;
   }
 
@@ -236,7 +338,7 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
     }
 
     const sql = `INSERT INTO ${quote(model)} (${createFields.map((field) => quote(field)).join(", ")}) VALUES (${insertPlaceholders}) ON CONFLICT (${conflictTarget}) DO UPDATE SET ${updateClause} RETURNING ${this.buildSelect(select)}`;
-    const rows = await this.query(sql, params);
+    const rows = await this.executor.query(sql, params);
     const row = rows[0];
 
     if (row !== undefined) {
@@ -267,7 +369,10 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
       args.model,
       buildIdentityFilter(this.getModel(args.model), existing),
     );
-    await this.query(`DELETE FROM ${quote(args.model)} WHERE ${builtWhere.sql}`, builtWhere.params);
+    await this.executor.query(
+      `DELETE FROM ${quote(args.model)} WHERE ${builtWhere.sql}`,
+      builtWhere.params,
+    );
   }
 
   async deleteMany<
@@ -284,7 +389,7 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
       params.push(...builtWhere.params);
     }
 
-    const rows = await this.query(`${sql} RETURNING 1 as touched`, params);
+    const rows = await this.executor.query(`${sql} RETURNING 1 as touched`, params);
     return rows.length;
   }
 
@@ -302,7 +407,7 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
       params.push(...builtWhere.params);
     }
 
-    const rows = await this.query(sql, params);
+    const rows = await this.executor.query(sql, params);
     const row = rows[0];
     return isRecord(row) && typeof row["count"] === "number"
       ? row["count"]
@@ -310,19 +415,11 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
   }
 
   transaction<T>(fn: (tx: Adapter<S>) => Promise<T>): Promise<T> {
-    if (supportsSavepoints(this.sql)) {
-      // Nested Postgres transactions become savepoints on the already-reserved
-      // transaction connection.
-      return this.sql.savepoint((savepointSql) => {
-        const txAdapter = new PostgresAdapter(this.schema, savepointSql);
-        return fn(txAdapter);
-      });
-    }
-
-    // Bun SQL already reserves a dedicated connection for the transaction callback,
-    // so unlike SQLite we do not need an extra top-level transaction queue here.
-    return this.sql.transaction((tx) => {
-      const txAdapter = new PostgresAdapter(this.schema, tx);
+    return this.executor.transaction((innerExecutor) => {
+      // Driver is not used in transaction adapter, only executor is injected
+      // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion, typescript/no-explicit-any
+      const txAdapter = new PostgresAdapter(this.schema, null as unknown as PostgresDriver);
+      txAdapter.executor = innerExecutor;
       return fn(txAdapter);
     });
   }
@@ -333,13 +430,6 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
       throw new Error(`Model ${model} not found in schema.`);
     }
     return modelSpec;
-  }
-
-  private query<T extends Record<string, unknown> = Record<string, unknown>>(
-    sql: string,
-    params: unknown[] = [],
-  ): Promise<T[]> {
-    return this.sql.unsafe<T[]>(sql, params);
   }
 
   private mapFieldType(field: Field): string {
@@ -354,7 +444,6 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
         return "BIGINT";
       case "json":
       case "json[]":
-        // Both logical JSON shapes can live in jsonb; the TS type distinguishes them.
         return "JSONB";
       default:
         return "TEXT";
@@ -369,9 +458,6 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
     if (path === undefined || path.length === 0) {
       return quote(field);
     }
-
-    // For v1, JSON-path sorting is kept simple and text-based. Filtering paths can
-    // still cast based on the comparison value, but sort semantics stay predictable.
     return this.buildColumnExpr(modelName, field, path);
   }
 
@@ -542,12 +628,18 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
     const expr = this.buildColumnExpr(modelName, where.field as string, where.path, where.value);
     switch (where.op) {
       case "eq":
+        if (where.value === null) {
+          return { sql: `${expr} IS NULL`, params: [], nextIndex: startIndex };
+        }
         return {
           sql: `${expr} = $${startIndex}`,
           params: [where.value],
           nextIndex: startIndex + 1,
         };
       case "ne":
+        if (where.value === null) {
+          return { sql: `${expr} IS NOT NULL`, params: [], nextIndex: startIndex };
+        }
         return {
           sql: `${expr} != $${startIndex}`,
           params: [where.value],

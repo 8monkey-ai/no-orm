@@ -61,12 +61,33 @@
   },
   "dependencies": {},
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/bun": "^1.3.12",
+    "@types/pg": "^8.11.11",
+    "@types/sqlite3": "^5.1.0",
     "oxfmt": "^0.44.0",
     "oxlint": "^1.59.0",
     "oxlint-tsgolint": "^0.20.0",
     "typescript": "^6.0.2"
   },
-  "peerDependencies": {},
-  "peerDependenciesMeta": {}
+  "peerDependencies": {
+    "better-sqlite3": "^11.0.0",
+    "pg": "^8.0.0",
+    "sqlite": "^5.0.0",
+    "sqlite3": "^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "better-sqlite3": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    },
+    "sqlite": {
+      "optional": true
+    },
+    "sqlite3": {
+      "optional": true
+    }
+  }
 }

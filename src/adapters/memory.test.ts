@@ -12,6 +12,7 @@ describe("MemoryAdapter", () => {
         age: { type: "number" },
         is_active: { type: "boolean" },
         metadata: { type: "json", nullable: true },
+        tags: { type: "json[]", nullable: true },
       },
       primaryKey: "id",
     },
@@ -178,13 +179,45 @@ describe("MemoryAdapter", () => {
     expect(results).toHaveLength(2);
   });
 
+  it("should filter by null equality (op: eq, value: null)", async () => {
+    await adapter.create({
+      model: "users",
+      data: { id: "u4", name: "NullUser", age: 40, is_active: true, metadata: null, tags: null },
+    });
+    const users = await adapter.findMany<"users", User>({
+      model: "users",
+      where: { field: "metadata", op: "eq", value: null },
+    });
+    expect(users.find((u) => u.id === "u4")).toBeDefined();
+  });
+
+  it("should filter by null inequality (op: ne, value: null)", async () => {
+    await adapter.create({
+      model: "users",
+      data: {
+        id: "u5",
+        name: "NotNullUser",
+        age: 40,
+        is_active: true,
+        metadata: { has_data: true },
+        tags: null,
+      },
+    });
+    const users = await adapter.findMany<"users", User>({
+      model: "users",
+      where: { field: "metadata", op: "ne", value: null },
+    });
+    expect(users.find((u) => u.id === "u5")).toBeDefined();
+    expect(users.find((u) => u.id === "u4")).toBeUndefined();
+  });
+
   describe("Upsert", () => {
     it("should handle upsert correctly (insert and update)", async () => {
       const userData: User = {
         id: "u1",
         name: "Alice",
         age: 25,
-        is_active: true,
+        is_active: true as boolean,
         metadata: null,
       };
 
@@ -220,7 +253,7 @@ describe("MemoryAdapter", () => {
         id: "u1",
         name: "Alice",
         age: 25,
-        is_active: true,
+        is_active: true as boolean,
         metadata: null,
       };
 
@@ -256,7 +289,8 @@ describe("MemoryAdapter", () => {
     });
 
     it("should throw error if primary key is missing in 'create' data", () => {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+      // Intentionally passing incomplete data to test validation
+      // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
       const invalidData = {
         name: "Missing ID",
         age: 20,

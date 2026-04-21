@@ -157,6 +157,68 @@ describe("SqliteAdapter", () => {
       });
       expect(users[0]?.id).toBe("u3");
     });
+
+    it("should filter by null equality (IS NULL)", async () => {
+      await adapter.create({
+        model: "users",
+        data: { id: "u4", name: "NullUser", age: 40, is_active: true, metadata: null, tags: null },
+      });
+      const users = await adapter.findMany<"users", User>({
+        model: "users",
+        where: { field: "metadata", op: "eq", value: null },
+      });
+      // u1, u2, u3 in beforeEach also have metadata: null
+      expect(users.length).toBeGreaterThanOrEqual(1);
+      expect(users.find((u) => u.id === "u4")).toBeDefined();
+    });
+
+    it("should filter by null inequality (IS NOT NULL)", async () => {
+      await adapter.create({
+        model: "users",
+        data: {
+          id: "u5",
+          name: "NotNullUser",
+          age: 40,
+          is_active: true,
+          metadata: { has_data: true },
+          tags: null,
+        },
+      });
+      const users = await adapter.findMany<"users", User>({
+        model: "users",
+        where: { field: "metadata", op: "ne", value: null },
+      });
+      expect(users.find((u) => u.id === "u5")).toBeDefined();
+      expect(users.find((u) => u.id === "u1")).toBeUndefined();
+    });
+
+    it("should sort records with null values", async () => {
+      await adapter.create({
+        model: "users",
+        data: {
+          id: "sn1",
+          name: "Alice",
+          age: 25,
+          is_active: true,
+          metadata: { theme: "dark" },
+          tags: null,
+        },
+      });
+      await adapter.create({
+        model: "users",
+        data: { id: "sn2", name: "Bob", age: 30, is_active: true, metadata: null, tags: null },
+      });
+
+      const results = await adapter.findMany({
+        model: "users",
+        where: { field: "id", op: "in", value: ["sn1", "sn2"] },
+        sortBy: [{ field: "metadata", direction: "asc" }],
+      });
+
+      expect(results).toHaveLength(2);
+      expect(results[0]?.["id"]).toBe("sn2"); // null should come first in SQLite ASC
+      expect(results[1]?.["id"]).toBe("sn1");
+    });
   });
 
   describe("JSON Path Filtering", () => {

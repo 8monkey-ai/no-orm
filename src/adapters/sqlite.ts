@@ -1,3 +1,8 @@
+import type { Database as BunDatabase } from "bun:sqlite";
+
+import type { Database as BetterSqlite3Database } from "better-sqlite3";
+import type { Database as SqliteDatabase } from "sqlite";
+
 import type { Adapter, Cursor, Field, InferModel, Schema, Select, SortBy, Where } from "../types";
 import {
   assertNoPrimaryKeyUpdates,
@@ -14,65 +19,110 @@ import {
 export type SqliteValue = string | number | Uint8Array | null;
 
 /**
- * The standard connection interface the adapter expects.
- * Keeping this narrow lets the adapter work with Bun's sqlite driver
- * and any small compatibility wrapper without adding another abstraction layer.
+ * Clean interface for SQLite execution.
  */
-export interface SqliteDatabase {
+interface SqliteExecutor {
   run(sql: string, params: SqliteValue[]): Promise<{ changes: number }>;
   get(sql: string, params: SqliteValue[]): Promise<Record<string, unknown> | null>;
   all(sql: string, params: SqliteValue[]): Promise<Record<string, unknown>[]>;
 }
 
-export interface NativeSqliteStatement {
-  run(...params: SqliteValue[]): unknown;
-  get(...params: SqliteValue[]): unknown;
-  all(...params: SqliteValue[]): unknown;
+export type SqliteDriver = SqliteDatabase | BunDatabase | BetterSqlite3Database | SqliteExecutor;
+
+/**
+ * Internal interface for synchronous SQLite drivers.
+ * Both Bun and Better-Sqlite3 expose `prepare` which returns a statement with run/get/all.
+ */
+interface SyncStatement {
+  run(...params: unknown[]): unknown;
+  get(...params: unknown[]): unknown;
+  all(...params: unknown[]): unknown;
 }
 
-export interface NativeSqliteDriver {
-  // This is a tiny compatibility surface, not a promise to support one specific
-  // external driver package. The adapter only needs `prepare/run/get/all`.
-  prepare(sql: string): NativeSqliteStatement;
+interface SyncDriver {
+  prepare(sql: string): SyncStatement;
+}
+
+/**
+ * Helper to wrap synchronous statements and handle casting.
+ * All environment sniffing and "any" usage is localized here.
+ */
+function createExecutor(driver: SqliteDriver): SqliteExecutor {
+  // If it's already an executor, return it
+  if (objIsObject(driver) && "run" in driver && "get" in driver && "all" in driver) {
+    // Already implements SqliteExecutor interface
+    // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
+    return driver as SqliteExecutor;
+  }
+
+  // Sniff for Sync Drivers (Bun or Better-Sqlite3)
+  const isSync = checkIsSyncDriver(driver);
+
+  if (isSync) {
+    // Duck-typing check: runtime inspection cannot narrow TypeScript union types
+    // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
+    const syncDb = driver as SyncDriver;
+    return {
+      run: (sql, params) => {
+        const stmt = syncDb.prepare(sql);
+        const result = stmt.run(...params);
+        return Promise.resolve({
+          changes:
+            isRecord(result) && typeof result["changes"] === "number" ? result["changes"] : 0,
+        });
+      },
+      get: (sql, params) => {
+        const stmt = syncDb.prepare(sql);
+        const row = stmt.get(...params);
+        return Promise.resolve(isRecord(row) ? row : null);
+      },
+      all: (sql, params) => {
+        const stmt = syncDb.prepare(sql);
+        const rows = stmt.all(...params);
+        return Promise.resolve(
+          Array.isArray(rows)
+            ? rows.filter((item): item is Record<string, unknown> => isRecord(item))
+            : [],
+        );
+      },
+    };
+  }
+
+  // Otherwise assume it matches SqliteDatabase (async sqlite driver)
+  // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
+  return driver as SqliteExecutor;
+}
+
+function objIsObject(obj: unknown): obj is Record<string, unknown> {
+  return obj !== null && typeof obj === "object";
+}
+
+function checkIsSyncDriver(obj: unknown): boolean {
+  if (!objIsObject(obj)) return false;
+  if (!("prepare" in obj) || typeof obj["prepare"] !== "function") return false;
+  const hasAsyncGet = "get" in obj && typeof obj["get"] === "function";
+  if (hasAsyncGet) {
+    // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
+    const getFn = obj["get"] as { constructor: { name: string } };
+    return getFn.constructor.name !== "AsyncFunction";
+  }
+  return true;
 }
 
 export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
-  private db: SqliteDatabase;
+  private executor: SqliteExecutor;
   private savepointCounter = 0;
+  // Top-level SQLite transactions on one shared connection must be serialized.
   private transactionQueue = Promise.resolve();
   private isTransaction = false;
 
   constructor(
     private schema: S,
-    database: SqliteDatabase | NativeSqliteDriver,
+    driver: SqliteDriver,
     _isTransaction = false,
   ) {
-    this.db = "prepare" in database ? this.wrapNativeDriver(database) : database;
+    this.executor = createExecutor(driver);
     this.isTransaction = _isTransaction;
-  }
-
-  private wrapNativeDriver(native: NativeSqliteDriver): SqliteDatabase {
-    // Normalize Bun's synchronous sqlite driver into the tiny async contract used
-    // by the adapter so the rest of the implementation can stay consistent.
-    return {
-      run: (sql, params) => {
-        const stmt = native.prepare(sql);
-        const result = stmt.run(...params);
-        const changes =
-          isRecord(result) && typeof result["changes"] === "number" ? result["changes"] : 0;
-        return Promise.resolve({ changes });
-      },
-      get: (sql, params) => {
-        const stmt = native.prepare(sql);
-        const row = stmt.get(...params);
-        return Promise.resolve(isRecord(row) ? row : null);
-      },
-      all: (sql, params) => {
-        const stmt = native.prepare(sql);
-        const rows = stmt.all(...params);
-        return Promise.resolve(Array.isArray(rows) ? rows.filter((item) => isRecord(item)) : []);
-      },
-    };
   }
 
   async migrate(): Promise<void> {
@@ -86,10 +136,8 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
         .map((field) => quote(field))
         .join(", ")})`;
 
-      // SQLite schema bootstrap is intentionally sequential.
-      // CREATE INDEX depends on CREATE TABLE and shared connections can lock.
       // oxlint-disable-next-line eslint/no-await-in-loop
-      await this.db.run(
+      await this.executor.run(
         `CREATE TABLE IF NOT EXISTS ${quote(name)} (${columns.join(", ")}, ${pk})`,
         [],
       );
@@ -105,7 +153,7 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
           .join(", ");
 
         // oxlint-disable-next-line eslint/no-await-in-loop
-        await this.db.run(
+        await this.executor.run(
           `CREATE INDEX IF NOT EXISTS ${quote(`idx_${name}_${i}`)} ON ${quote(name)} (${fields})`,
           [],
         );
@@ -123,9 +171,12 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
     const fields = Object.keys(mappedData);
     const placeholders = fields.map(() => "?").join(", ");
     const columns = fields.map((field) => quote(field)).join(", ");
-    const params = fields.map((field) => mappedData[field] ?? null);
+    const params = fields.map((field) => this.toSqliteValue(mappedData[field]));
 
-    await this.db.run(`INSERT INTO ${quote(model)} (${columns}) VALUES (${placeholders})`, params);
+    await this.executor.run(
+      `INSERT INTO ${quote(model)} (${columns}) VALUES (${placeholders})`,
+      params,
+    );
 
     const result = await this.find<K, T>({
       model,
@@ -146,7 +197,7 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
     const { model, where, select } = args;
     const builtWhere = this.buildWhere(model, where);
     const sql = `SELECT ${this.buildSelect(select)} FROM ${quote(model)} WHERE ${builtWhere.sql} LIMIT 1`;
-    const row = await this.db.get(sql, builtWhere.params);
+    const row = await this.executor.get(sql, builtWhere.params);
     return row === null ? null : this.mapRow(model, row, select);
   }
 
@@ -192,7 +243,7 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
       params.push(offset);
     }
 
-    const rows = await this.db.all(parts.join(" "), params);
+    const rows = await this.executor.all(parts.join(" "), params);
     return rows.map((row) => this.mapRow(model, row, select));
   }
 
@@ -216,11 +267,11 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
     }
 
     const assignments = fields.map((field) => `${quote(field)} = ?`).join(", ");
-    const params = fields.map((field) => mappedData[field] ?? null);
+    const params = fields.map((field) => this.toSqliteValue(mappedData[field]));
     const primaryKeyWhere: Where<T> = buildIdentityFilter(modelSpec, existing);
     const builtWhere = this.buildWhere(model, primaryKeyWhere);
 
-    await this.db.run(`UPDATE ${quote(model)} SET ${assignments} WHERE ${builtWhere.sql}`, [
+    await this.executor.run(`UPDATE ${quote(model)} SET ${assignments} WHERE ${builtWhere.sql}`, [
       ...params,
       ...builtWhere.params,
     ]);
@@ -243,7 +294,7 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
     }
 
     const assignments = fields.map((field) => `${quote(field)} = ?`).join(", ");
-    const params = fields.map((field) => mappedData[field] ?? null);
+    const params = fields.map((field) => this.toSqliteValue(mappedData[field]));
     let sql = `UPDATE ${quote(model)} SET ${assignments}`;
 
     if (where !== undefined) {
@@ -252,7 +303,7 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
       params.push(...builtWhere.params);
     }
 
-    const result = await this.db.run(sql, params);
+    const result = await this.executor.run(sql, params);
     return result.changes;
   }
 
@@ -289,10 +340,10 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
     const params =
       updateFields.length > 0
         ? [
-            ...createFields.map((field) => mappedCreate[field] ?? null),
-            ...updateFields.map((field) => mappedUpdate[field] ?? null),
+            ...createFields.map((field) => this.toSqliteValue(mappedCreate[field])),
+            ...updateFields.map((field) => this.toSqliteValue(mappedUpdate[field])),
           ]
-        : createFields.map((field) => mappedCreate[field] ?? null);
+        : createFields.map((field) => this.toSqliteValue(mappedCreate[field]));
 
     if (where !== undefined) {
       const builtWhere = this.buildWhere(model, where);
@@ -300,7 +351,7 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
       params.push(...builtWhere.params);
     }
 
-    await this.db.run(
+    await this.executor.run(
       `INSERT INTO ${quote(model)} (${insertColumns}) VALUES (${insertPlaceholders}) ON CONFLICT(${conflictColumns}) DO UPDATE SET ${updateClause}`,
       params,
     );
@@ -330,7 +381,7 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
       args.model,
       buildIdentityFilter(this.getModel(args.model), existing),
     );
-    await this.db.run(
+    await this.executor.run(
       `DELETE FROM ${quote(args.model)} WHERE ${builtWhere.sql}`,
       builtWhere.params,
     );
@@ -350,7 +401,7 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
       params.push(...builtWhere.params);
     }
 
-    const result = await this.db.run(sql, params);
+    const result = await this.executor.run(sql, params);
     return result.changes;
   }
 
@@ -368,24 +419,22 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
       params.push(...builtWhere.params);
     }
 
-    const result = await this.db.get(sql, params);
+    const result = await this.executor.get(sql, params);
     return isRecord(result) && typeof result["count"] === "number" ? result["count"] : 0;
   }
 
   transaction<T>(fn: (tx: Adapter<S>) => Promise<T>): Promise<T> {
     if (this.isTransaction) {
-      // Nested transactions stay on the current connection and use savepoints.
-      return this.runSavepoint(this.db, fn);
+      return this.runSavepoint(this.executor, fn);
     }
-
-    // Top-level SQLite transactions on one shared connection must be serialized.
-    return this.withTransactionLock(() => this.runSavepoint(this.db, fn));
+    return this.withTransactionLock(() => this.runSavepoint(this.executor, fn));
   }
 
   private async runSavepoint<T>(
-    db: SqliteDatabase,
+    db: SqliteExecutor,
     fn: (tx: Adapter<S>) => Promise<T>,
   ): Promise<T> {
+    // Nested transactions stay on the current connection and use savepoints.
     const savepoint = quote(`sp_${this.savepointCounter++}`);
     const txAdapter = new SqliteAdapter(this.schema, db, true);
 
@@ -408,8 +457,6 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
     const previous = this.transactionQueue;
     this.transactionQueue = previous.then(() => current);
 
-    // SQLite uses one connection here, so top-level transactions are serialized.
-    // Nested transactions still work via savepoints on that same connection.
     await previous;
     try {
       return await fn();
@@ -503,8 +550,6 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
 
       for (let j = 0; j < i; j++) {
         const previous = sortCriteria[j]!;
-        // Lexicographic keyset pagination:
-        // (a > ?) OR (a = ? AND b > ?) OR (a = ? AND b = ? AND c > ?)
         andClauses.push(`${this.buildColumnExpr(modelName, previous.field, previous.path)} = ?`);
         params.push(this.mapWhereValue(cursorValues[previous.field]));
       }
@@ -576,8 +621,14 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
 
     switch (where.op) {
       case "eq":
+        if (where.value === null) {
+          return { sql: `${expr} IS NULL`, params: [] };
+        }
         return { sql: `${expr} = ?`, params: [this.mapWhereValue(where.value)] };
       case "ne":
+        if (where.value === null) {
+          return { sql: `${expr} IS NOT NULL`, params: [] };
+        }
         return { sql: `${expr} != ?`, params: [this.mapWhereValue(where.value)] };
       case "gt":
         return { sql: `${expr} > ?`, params: [this.mapWhereValue(where.value)] };
@@ -611,8 +662,8 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
   private mapInput(
     fields: Record<string, Field>,
     data: Record<string, unknown> | Partial<Record<string, unknown>>,
-  ): Record<string, SqliteValue> {
-    const result: Record<string, SqliteValue> = {};
+  ): Record<string, unknown> {
+    const result: Record<string, unknown> = {};
 
     for (const [fieldName, field] of Object.entries(fields)) {
       const value = data[fieldName];
@@ -627,7 +678,7 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
       } else if (field.type === "boolean") {
         result[fieldName] = value === true ? 1 : 0;
       } else {
-        result[fieldName] = this.toSqliteValue(value);
+        result[fieldName] = value;
       }
     }
 
@@ -678,8 +729,13 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
   }
 
   private toSqliteValue(value: unknown): SqliteValue {
-    if (typeof value === "string" || typeof value === "number" || value instanceof Uint8Array) {
-      return value;
+    if (
+      typeof value === "string" ||
+      typeof value === "number" ||
+      value instanceof Uint8Array ||
+      value === null
+    ) {
+      return value as SqliteValue;
     }
 
     if (typeof value === "boolean") {
