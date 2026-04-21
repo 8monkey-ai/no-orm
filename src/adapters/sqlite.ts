@@ -7,10 +7,10 @@ import type { Adapter, Cursor, Field, InferModel, Schema, Select, SortBy, Where 
 import {
   assertNoPrimaryKeyUpdates,
   buildIdentityFilter,
-  escapeLiteral,
   getIdentityValues,
   getPrimaryKeyFields,
   isRecord,
+  JSON_PATH_INDEX,
   mapNumeric,
   quote,
   validateJsonPath,
@@ -506,8 +506,12 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
       throw new Error(`Cannot use JSON path on non-JSON field: ${field}`);
     }
 
-    const jsonPath = `$.${validateJsonPath(path).join(".")}`;
-    return `json_extract(${quote(field)}, '${escapeLiteral(jsonPath)}')`;
+    const jsonPath =
+      "$" +
+      validateJsonPath(path)
+        .map((segment) => (JSON_PATH_INDEX.test(segment) ? `[${segment}]` : `.${segment}`))
+        .join("");
+    return `json_extract(${quote(field)}, '${jsonPath}')`;
   }
 
   private buildCursor<T>(

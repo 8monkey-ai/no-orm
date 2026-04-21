@@ -23,6 +23,7 @@ export function escapeLiteral(val: string): string {
 // --- Schema & Logic Helpers ---
 
 const JSON_PATH_SEGMENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
+export const JSON_PATH_INDEX = /^[0-9]+$/;
 
 export function getPrimaryKeyFields(model: Model): string[] {
   return Array.isArray(model.primaryKey) ? model.primaryKey : [model.primaryKey];
@@ -49,7 +50,7 @@ export function getIdentityValues(
 
 export function validateJsonPath(path: string[]): string[] {
   for (const segment of path) {
-    if (!JSON_PATH_SEGMENT.test(segment)) {
+    if (!JSON_PATH_SEGMENT.test(segment) && !JSON_PATH_INDEX.test(segment)) {
       throw new Error(`Invalid JSON path segment: ${segment}`);
     }
   }

@@ -452,6 +452,344 @@ describe("SqliteAdapter", () => {
     });
   });
 
+  describe("Boolean Filtering", () => {
+    beforeEach(async () => {
+      await adapter.create({
+        model: "users",
+        data: { id: "b1", name: "Active1", age: 20, is_active: true, metadata: null, tags: null },
+      });
+      await adapter.create({
+        model: "users",
+        data: {
+          id: "b2",
+          name: "Inactive1",
+          age: 20,
+          is_active: false,
+          metadata: null,
+          tags: null,
+        },
+      });
+      await adapter.create({
+        model: "users",
+        data: { id: "b3", name: "Active2", age: 30, is_active: true, metadata: null, tags: null },
+      });
+    });
+
+    it("should filter by boolean eq true", async () => {
+      const users = await adapter.findMany<"users", User>({
+        model: "users",
+        where: { field: "is_active", op: "eq", value: true },
+      });
+      expect(users).toHaveLength(2);
+      // oxlint-disable-next-line unicorn/no-array-sort
+      expect(users.map((u) => u["id"]).sort()).toEqual(["b1", "b3"]);
+    });
+
+    it("should filter by boolean eq false", async () => {
+      const users = await adapter.findMany<"users", User>({
+        model: "users",
+        where: { field: "is_active", op: "eq", value: false },
+      });
+      expect(users).toHaveLength(1);
+      expect(users[0]?.["id"]).toBe("b2");
+    });
+
+    it("should filter by boolean in list", async () => {
+      const users = await adapter.findMany<"users", User>({
+        model: "users",
+        where: { field: "is_active", op: "in", value: [true] },
+      });
+      expect(users).toHaveLength(2);
+    });
+  });
+
+  describe("Count", () => {
+    beforeEach(async () => {
+      await Promise.all([
+        adapter.create({
+          model: "users",
+          data: { id: "c1", name: "Alice", age: 25, is_active: true, metadata: null, tags: null },
+        }),
+        adapter.create({
+          model: "users",
+          data: { id: "c2", name: "Bob", age: 30, is_active: false, metadata: null, tags: null },
+        }),
+        adapter.create({
+          model: "users",
+          data: { id: "c3", name: "Charlie", age: 35, is_active: true, metadata: null, tags: null },
+        }),
+      ]);
+    });
+
+    it("should count all records", async () => {
+      const count = await adapter.count({ model: "users" });
+      expect(count).toBe(3);
+    });
+
+    it("should count with where clause", async () => {
+      const count = await adapter.count({
+        model: "users",
+        where: { field: "is_active", op: "eq", value: true },
+      });
+      expect(count).toBe(2);
+    });
+
+    it("should count with complex where clause", async () => {
+      const count = await adapter.count({
+        model: "users",
+        where: {
+          and: [
+            { field: "age", op: "gte", value: 30 },
+            { field: "is_active", op: "eq", value: true },
+          ],
+        },
+      });
+      expect(count).toBe(1);
+    });
+
+    it("should count with no matches", async () => {
+      const count = await adapter.count({
+        model: "users",
+        where: { field: "age", op: "gt", value: 100 },
+      });
+      expect(count).toBe(0);
+    });
+  });
+
+  describe("DeleteMany", () => {
+    beforeEach(async () => {
+      await Promise.all([
+        adapter.create({
+          model: "users",
+          data: { id: "d1", name: "Alice", age: 25, is_active: true, metadata: null, tags: null },
+        }),
+        adapter.create({
+          model: "users",
+          data: { id: "d2", name: "Bob", age: 30, is_active: false, metadata: null, tags: null },
+        }),
+        adapter.create({
+          model: "users",
+          data: { id: "d3", name: "Charlie", age: 35, is_active: true, metadata: null, tags: null },
+        }),
+      ]);
+    });
+
+    it("should delete all records with no where clause", async () => {
+      const deleted = await adapter.deleteMany({ model: "users" });
+      expect(deleted).toBe(3);
+      const count = await adapter.count({ model: "users" });
+      expect(count).toBe(0);
+    });
+
+    it("should delete matching records", async () => {
+      const deleted = await adapter.deleteMany({
+        model: "users",
+        where: { field: "is_active", op: "eq", value: true },
+      });
+      expect(deleted).toBe(2);
+      const remaining = await adapter.findMany({ model: "users" });
+      expect(remaining).toHaveLength(1);
+      expect(remaining[0]?.id).toBe("d2");
+    });
+
+    it("should return 0 when no matches", async () => {
+      const deleted = await adapter.deleteMany({
+        model: "users",
+        where: { field: "age", op: "gt", value: 100 },
+      });
+      expect(deleted).toBe(0);
+    });
+  });
+
+  describe("UpdateMany", () => {
+    beforeEach(async () => {
+      await Promise.all([
+        adapter.create({
+          model: "users",
+          data: { id: "u1", name: "Alice", age: 25, is_active: true, metadata: null, tags: null },
+        }),
+        adapter.create({
+          model: "users",
+          data: { id: "u2", name: "Bob", age: 30, is_active: false, metadata: null, tags: null },
+        }),
+        adapter.create({
+          model: "users",
+          data: { id: "u3", name: "Charlie", age: 35, is_active: true, metadata: null, tags: null },
+        }),
+      ]);
+    });
+
+    it("should update all records with no where clause", async () => {
+      const updated = await adapter.updateMany({
+        model: "users",
+        data: { age: 99 },
+      });
+      expect(updated).toBe(3);
+      const users = await adapter.findMany({ model: "users" });
+      expect(users.every((u) => u.age === 99)).toBe(true);
+    });
+
+    it("should update matching records", async () => {
+      const updated = await adapter.updateMany<"users", User>({
+        model: "users",
+        where: { field: "is_active", op: "eq", value: true },
+        data: { age: 100 },
+      });
+      expect(updated).toBe(2);
+      const users = await adapter.findMany({ model: "users" });
+      const actives = users.filter((u) => u["is_active"]);
+      const inactive = users.find((u) => !u["is_active"]);
+      expect(actives.every((u) => u["age"] === 100)).toBe(true);
+      expect(inactive?.["age"]).toBe(30);
+    });
+
+    it("should return 0 when no matches", async () => {
+      const updated = await adapter.updateMany({
+        model: "users",
+        where: { field: "age", op: "gt", value: 100 },
+        data: { age: 0 },
+      });
+      expect(updated).toBe(0);
+    });
+
+    it("should do nothing with empty data", async () => {
+      const updated = await adapter.updateMany({
+        model: "users",
+        where: { field: "id", op: "eq", value: "u1" },
+        data: {},
+      });
+      expect(updated).toBe(0);
+    });
+  });
+
+  describe("Migration Idempotency", () => {
+    it("should be idempotent when running migrate twice", async () => {
+      await adapter.migrate();
+      await adapter.migrate();
+      const count = await adapter.count({ model: "users" });
+      expect(count).toBe(0);
+    });
+
+    it("should preserve data when running migrate twice", async () => {
+      await adapter.create({
+        model: "users",
+        data: { id: "m1", name: "Test", age: 20, is_active: true, metadata: null, tags: null },
+      });
+      await adapter.migrate();
+      await adapter.migrate();
+      const found = await adapter.find({
+        model: "users",
+        where: { field: "id", op: "eq", value: "m1" },
+      });
+      expect(found?.["name"]).toBe("Test");
+    });
+  });
+
+  describe("Composite Primary Key", () => {
+    const compositeSchema = {
+      order_items: {
+        fields: {
+          order_id: { type: "string" },
+          item_id: { type: "string" },
+          quantity: { type: "number" },
+          price: { type: "number" },
+        },
+        primaryKey: ["order_id", "item_id"],
+      },
+    } satisfies Schema;
+
+    type OrderItem = { order_id: string; item_id: string; quantity: number; price: number };
+
+    it("should handle composite primary key operations", async () => {
+      const compAdapter = new SqliteAdapter(compositeSchema, db);
+      await compAdapter.migrate();
+
+      await compAdapter.create<"order_items", OrderItem>({
+        model: "order_items",
+        data: { order_id: "o1", item_id: "i1", quantity: 2, price: 10 },
+      });
+
+      const found = await compAdapter.find<"order_items", OrderItem>({
+        model: "order_items",
+        where: { field: "order_id", op: "eq", value: "o1" },
+      });
+      expect(found?.["quantity"]).toBe(2);
+
+      await compAdapter.update<"order_items", OrderItem>({
+        model: "order_items",
+        where: { field: "order_id", op: "eq", value: "o1" },
+        data: { quantity: 5 },
+      });
+
+      const updated = await compAdapter.find<"order_items", OrderItem>({
+        model: "order_items",
+        where: { field: "order_id", op: "eq", value: "o1" },
+      });
+      expect(updated?.["quantity"]).toBe(5);
+    });
+  });
+
+  describe("JSON Array Filtering", () => {
+    it("should filter by json array field", async () => {
+      await adapter.create({
+        model: "users",
+        data: {
+          id: "j1",
+          name: "User1",
+          age: 20,
+          is_active: true,
+          metadata: null,
+          tags: ["admin", "vip"],
+        },
+      });
+      await adapter.create({
+        model: "users",
+        data: {
+          id: "j2",
+          name: "User2",
+          age: 20,
+          is_active: true,
+          metadata: null,
+          tags: ["user"],
+        },
+      });
+
+      const users = await adapter.findMany<"users", User>({
+        model: "users",
+        where: { field: "tags", path: ["0"], op: "eq", value: "admin" },
+      });
+      expect(users).toHaveLength(1);
+      expect(users[0]?.["id"]).toBe("j1");
+    });
+  });
+
+  describe("Minimal Schema Model", () => {
+    const minimalSchema = {
+      minimal_table: {
+        fields: {
+          id: { type: "string" },
+        },
+        primaryKey: "id",
+      },
+    } satisfies Schema;
+
+    it("should handle minimal model with single field", async () => {
+      const minAdapter = new SqliteAdapter(minimalSchema, db);
+      await minAdapter.migrate();
+
+      await minAdapter.create({
+        model: "minimal_table",
+        data: { id: "e1" },
+      });
+
+      const found = await minAdapter.find({
+        model: "minimal_table",
+        where: { field: "id", op: "eq", value: "e1" },
+      });
+      expect(found?.["id"]).toBe("e1");
+    });
+  });
+
   describe("Upsert", () => {
     it("should handle upsert correctly", async () => {
       const data: User = {

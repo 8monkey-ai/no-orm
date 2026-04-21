@@ -626,6 +626,7 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
     }
 
     const expr = this.buildColumnExpr(modelName, where.field as string, where.path, where.value);
+    const mappedValue = this.mapWhereValue(where.value);
     switch (where.op) {
       case "eq":
         if (where.value === null) {
@@ -633,7 +634,7 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
         }
         return {
           sql: `${expr} = $${startIndex}`,
-          params: [where.value],
+          params: [mappedValue],
           nextIndex: startIndex + 1,
         };
       case "ne":
@@ -642,51 +643,55 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
         }
         return {
           sql: `${expr} != $${startIndex}`,
-          params: [where.value],
+          params: [mappedValue],
           nextIndex: startIndex + 1,
         };
       case "gt":
         return {
           sql: `${expr} > $${startIndex}`,
-          params: [where.value],
+          params: [mappedValue],
           nextIndex: startIndex + 1,
         };
       case "gte":
         return {
           sql: `${expr} >= $${startIndex}`,
-          params: [where.value],
+          params: [mappedValue],
           nextIndex: startIndex + 1,
         };
       case "lt":
         return {
           sql: `${expr} < $${startIndex}`,
-          params: [where.value],
+          params: [mappedValue],
           nextIndex: startIndex + 1,
         };
       case "lte":
         return {
           sql: `${expr} <= $${startIndex}`,
-          params: [where.value],
+          params: [mappedValue],
           nextIndex: startIndex + 1,
         };
-      case "in":
+      case "in": {
         if (where.value.length === 0) {
           return { sql: "1=0", params: [], nextIndex: startIndex };
         }
+        const inValues = where.value.map((v) => this.mapWhereValue(v));
         return {
           sql: `${expr} IN (${where.value.map((_, index) => `$${startIndex + index}`).join(", ")})`,
-          params: where.value,
+          params: inValues,
           nextIndex: startIndex + where.value.length,
         };
-      case "not_in":
+      }
+      case "not_in": {
         if (where.value.length === 0) {
           return { sql: "1=1", params: [], nextIndex: startIndex };
         }
+        const notInValues = where.value.map((v) => this.mapWhereValue(v));
         return {
           sql: `${expr} NOT IN (${where.value.map((_, index) => `$${startIndex + index}`).join(", ")})`,
-          params: where.value,
+          params: notInValues,
           nextIndex: startIndex + where.value.length,
         };
+      }
       default:
         throw new Error(`Unsupported operator: ${(where as { op: string }).op}`);
     }
@@ -698,13 +703,33 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
   ): Record<string, unknown> {
     const result: Record<string, unknown> = {};
 
-    for (const [fieldName] of Object.entries(fields)) {
+    for (const [fieldName, field] of Object.entries(fields)) {
       const value = data[fieldName];
       if (value === undefined) continue;
-      result[fieldName] = value;
+      if (value === null) {
+        result[fieldName] = null;
+        continue;
+      }
+
+      if (field.type === "json" || field.type === "json[]") {
+        result[fieldName] = value;
+      } else if (field.type === "boolean") {
+        result[fieldName] = value === true;
+      } else {
+        result[fieldName] = value;
+      }
     }
 
     return result;
+  }
+
+  private mapWhereValue(value: unknown): unknown {
+    if (value === null) return null;
+    if (typeof value === "boolean") return value;
+    if (typeof value === "object" && value !== null) {
+      return JSON.stringify(value);
+    }
+    return value;
   }
 
   private mapRow<K extends keyof S & string, T extends Record<string, unknown>>(
@@ -726,7 +751,11 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
         continue;
       }
 
-      if (fieldSpec.type === "number" || fieldSpec.type === "timestamp") {
+      if (fieldSpec.type === "json" || fieldSpec.type === "json[]") {
+        output[fieldName] = typeof value === "string" ? JSON.parse(value) : value;
+      } else if (fieldSpec.type === "boolean") {
+        output[fieldName] = value === true || value === 1;
+      } else if (fieldSpec.type === "number" || fieldSpec.type === "timestamp") {
         output[fieldName] = mapNumeric(value);
       } else {
         output[fieldName] = value;
