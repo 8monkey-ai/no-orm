@@ -197,5 +197,5 @@ export interface SortBy<T = Record<string, unknown>> {
 }
 
 export interface Cursor<T = Record<string, unknown>> {
-  after: Partial<Record<FieldName<T>, unknown>>;
+  after: Record<FieldName<T>, unknown>;
 }

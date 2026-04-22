@@ -5,7 +5,6 @@ import {
   buildIdentityFilter,
   getIdentityValues,
   getPrimaryKeyFields,
-  isRecord,
   mapNumeric,
 } from "./common";
 
@@ -18,6 +17,7 @@ export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S
 
   async migrate(): Promise<void> {
     const models = Object.entries(this.schema);
+    const runPromises: Promise<unknown>[] = [];
     for (let i = 0; i < models.length; i++) {
       const [name, model] = models[i]!;
       const fields = Object.entries(model.fields);
@@ -25,6 +25,7 @@ export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S
       for (let j = 0; j < fields.length; j++) {
         const [fieldName, field] = fields[j]!;
         const nullable = field.nullable === true ? "" : " NOT NULL";
+
         columns.push(
           `${this.dialect.quote(fieldName)} ${this.dialect.mapFieldType(field)}${nullable}`,
         );
@@ -37,9 +38,11 @@ export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S
       }
       const pk = `PRIMARY KEY (${quotedPkFields.join(", ")})`;
 
-      await this.executor.run(
-        `CREATE TABLE IF NOT EXISTS ${this.dialect.quote(name)} (${columns.join(", ")}, ${pk})`,
-        [],
+      runPromises.push(
+        this.executor.run(
+          `CREATE TABLE IF NOT EXISTS ${this.dialect.quote(name)} (${columns.join(", ")}, ${pk})`,
+          [],
+        ),
       );
 
       if (model.indexes) {
@@ -52,13 +55,16 @@ export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S
               `${this.dialect.quote(indexFields[k]!)}${index.order ? ` ${index.order.toUpperCase()}` : ""}`,
             );
           }
-          await this.executor.run(
-            `CREATE INDEX IF NOT EXISTS ${this.dialect.quote(`idx_${name}_${j}`)} ON ${this.dialect.quote(name)} (${formattedFields.join(", ")})`,
-            [],
+          runPromises.push(
+            this.executor.run(
+              `CREATE INDEX IF NOT EXISTS ${this.dialect.quote(`idx_${name}_${j}`)} ON ${this.dialect.quote(name)} (${formattedFields.join(", ")})`,
+              [],
+            ),
           );
         }
       }
     }
+    await Promise.all(runPromises);
   }
 
   async create<
@@ -67,6 +73,7 @@ export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S
   >(args: { model: K; data: T; select?: Select<T> }): Promise<T> {
     const { model, data, select } = args;
     const modelSpec = this.getModel(model);
+
     const insertData = this.mapInput(modelSpec.fields, data);
     const fields = Object.keys(insertData);
 
@@ -82,17 +89,20 @@ export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S
     }
 
     const sql = `INSERT INTO ${this.dialect.quote(model)} (${quotedFields.join(", ")}) VALUES (${placeholders.join(", ")}) RETURNING ${this.buildSelect(select)}`;
-    const row = await this.executor.get<Record<string, unknown>>(sql, values);
+    const row = await this.executor.get(sql, values);
 
     if (!row) {
       // Fallback for drivers that don't support RETURNING
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
       return (await this.find({
         model,
-        where: buildIdentityFilter(modelSpec, data),
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+        where: buildIdentityFilter(modelSpec, data) as unknown as Where<T>,
         select,
       })) as T;
     }
 
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion, @typescript-eslint/no-unsafe-return
     return this.mapRow(model, row, select);
   }
 
@@ -103,7 +113,8 @@ export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S
     const { model, where, select } = args;
     const builtWhere = this.buildWhere(model, where);
     const sql = `SELECT ${this.buildSelect(select)} FROM ${this.dialect.quote(model)} WHERE ${builtWhere.sql} LIMIT 1`;
-    const row = await this.executor.get<Record<string, unknown>>(sql, builtWhere.params);
+    const row = await this.executor.get(sql, builtWhere.params);
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion, @typescript-eslint/no-unsafe-return
     return row ? this.mapRow(model, row, select) : null;
   }
 
@@ -152,10 +163,14 @@ export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S
       params.push(offset);
     }
 
-    const rows = await this.executor.all<Record<string, unknown>>(sql, params);
+    const rows = await this.executor.all(sql, params);
     const result: T[] = [];
     for (let i = 0; i < rows.length; i++) {
-      result.push(this.mapRow(model, rows[i], select));
+      const row = rows[i];
+      if (row) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion, @typescript-eslint/no-unsafe-argument
+        result.push(this.mapRow(model, row, select));
+      }
     }
     return result;
   }
@@ -188,11 +203,12 @@ export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S
       params.push(builtWhere.params[i]);
     }
 
-    const row = await this.executor.get<Record<string, unknown>>(sql, params);
+    const row = await this.executor.get(sql, params);
     if (!row) {
       // Check if it exists and return it if no changes were needed or RETURNING not supported
       return this.find({ model, where });
     }
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion, @typescript-eslint/no-unsafe-return
     return this.mapRow(model, row);
   }
 
@@ -285,8 +301,10 @@ export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S
         select,
         whereSql,
       });
-      const row = await this.executor.get<Record<string, unknown>>(sql, upsertParams ?? params);
-      if (row) return this.mapRow(model, row, select);
+      const row = await this.executor.get(sql, upsertParams ?? params);
+      if (row)
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion, @typescript-eslint/no-unsafe-return
+        return this.mapRow(model, row, select);
     } else {
       // Generic fallback for ON CONFLICT (Postgres/SQLite)
       const conflictTarget = [];
@@ -309,14 +327,17 @@ export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S
       }
 
       const sql = `INSERT INTO ${this.dialect.quote(model)} (${insertColumns.join(", ")}) VALUES (${insertPlaceholders.join(", ")}) ON CONFLICT (${conflictTarget.join(", ")}) ${updateSet} RETURNING ${this.buildSelect(select)}`;
-      const row = await this.executor.get<Record<string, unknown>>(sql, params);
-      if (row) return this.mapRow(model, row, select);
+      const row = await this.executor.get(sql, params);
+      if (row)
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion, @typescript-eslint/no-unsafe-return
+        return this.mapRow(model, row, select);
     }
 
     const identityValues = getIdentityValues(modelSpec, create);
     const existing = await this.find({
       model,
-      where: buildIdentityFilter(modelSpec, identityValues),
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+      where: buildIdentityFilter(modelSpec, identityValues) as unknown as Where<T>,
       select,
     });
     if (!existing) throw new Error("Failed to refetch upserted record.");
@@ -363,7 +384,7 @@ export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S
       sql += ` WHERE ${builtWhere.sql}`;
       for (let i = 0; i < builtWhere.params.length; i++) params.push(builtWhere.params[i]);
     }
-    const row = await this.executor.get<Record<string, unknown>>(sql, params);
+    const row = await this.executor.get(sql, params);
     if (!row) return 0;
     const count = row["count"];
     return typeof count === "number" ? count : Number(count ?? 0);
@@ -371,7 +392,7 @@ export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S
 
   // --- HELPERS ---
 
-  protected getModel(model: string): S[keyof S] {
+  protected getModel<K extends keyof S & string>(model: K): S[K] {
     const spec = this.schema[model];
     if (!spec) throw new Error(`Model ${model} not found in schema.`);
     return spec;
@@ -508,7 +529,8 @@ export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S
         return { sql: `${expr} NOT IN (${phs.join(", ")})`, params: inParams };
       }
     }
-    throw new Error(`Unsupported operator: ${(where as any).op}`);
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion, @typescript-eslint/no-unsafe-member-access
+    throw new Error(`Unsupported operator: ${String((where as Record<string, unknown>)["op"])}`);
   }
 
   private buildCursor(
@@ -517,7 +539,7 @@ export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S
     sortBy?: SortBy<any>[],
     startIndex = 0,
   ): { sql: string; params: unknown[] } {
-    const cursorValues = cursor.after as Record<string, unknown>;
+    const cursorValues = cursor.after;
     const criteria = [];
     if (sortBy && sortBy.length > 0) {
       for (let i = 0; i < sortBy.length; i++) {

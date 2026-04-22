@@ -10,35 +10,16 @@ export type PostgresDriver =
   | PgPoolClient
   | PostgresJsSql
   | TransactionSql
-  | any;
+  | BunSqlDriver;
 
-let LRU: any;
-// @ts-expect-error
-import("lru-cache")
-  .then((m) => {
-    LRU = m.LRUCache;
-  })
-  .catch(() => {});
-
-const pgCacheMap = new WeakMap<any>();
-
-function getPgCache(client: any) {
-  let cache = pgCacheMap.get(client);
-  if (!cache && LRU) {
-    cache = new LRU({ max: 100 });
-    pgCacheMap.set(client, cache);
-  }
-  return cache;
+export interface BunSqlDriver {
+  unsafe<R = Record<string, unknown>[]>(query: string, params?: unknown[]): Promise<R>;
+  transaction<T>(fn: (tx: BunSqlDriver) => Promise<T>): Promise<T>;
 }
 
 let queryCount = 0;
-function getNamedQuery(sql: string, cache?: any) {
-  if (!cache) return { text: sql };
-  let name = cache.get(sql);
-  if (!name) {
-    name = `no_orm_${queryCount++}`;
-    cache.set(sql, name);
-  }
+function getNamedQuery(sql: string) {
+  const name = `no_orm_${queryCount++}`;
   return { name, text: sql };
 }
 
@@ -79,15 +60,18 @@ export const PostgresDialect: SqlDialect = {
   ): string {
     const segments = this.buildJsonPath(path);
     const base = `jsonb_extract_path_text(${column}, ${segments})`;
-    if (isNumeric) return `(${base})::double precision`;
-    if (isBoolean) return `(${base})::boolean`;
+    if (isNumeric === true) return `(${base})::double precision`;
+    if (isBoolean === true) return `(${base})::boolean`;
     return base;
   },
   upsert(args) {
     const { table, insertColumns, insertPlaceholders, updateColumns, conflictColumns, whereSql } =
       args;
-    const pk = [];
-    for (let i = 0; i < conflictColumns.length; i++) pk.push(this.quote(conflictColumns[i]));
+    const pk: string[] = [];
+    for (let i = 0; i < conflictColumns.length; i++) {
+      const col = conflictColumns[i];
+      if (col !== undefined) pk.push(this.quote(col));
+    }
 
     let updateSet = "";
     if (updateColumns.length > 0) {
@@ -97,7 +81,7 @@ export const PostgresDialect: SqlDialect = {
         sets.push(`${this.quote(col)} = EXCLUDED.${this.quote(col)}`);
       }
       updateSet = `DO UPDATE SET ${sets.join(", ")}`;
-      if (whereSql) updateSet += ` WHERE ${whereSql}`;
+      if (whereSql !== undefined) updateSet += ` WHERE ${whereSql}`;
     } else {
       updateSet = "DO NOTHING";
     }
@@ -108,34 +92,38 @@ export const PostgresDialect: SqlDialect = {
   },
 };
 
-function isPostgresJs(driver: any): driver is PostgresJsSql {
-  return typeof driver.unsafe === "function" && typeof driver.begin === "function";
+function isPostgresJs(driver: unknown): driver is PostgresJsSql {
+  if (typeof driver !== "object" || driver === null) return false;
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+  const record = driver as Record<string, unknown>;
+  return (
+    "unsafe" in record &&
+    "begin" in record &&
+    typeof record["unsafe"] === "function" &&
+    typeof record["begin"] === "function"
+  );
 }
 
-function isBunSql(driver: any): boolean {
-  return typeof driver.unsafe === "function" && typeof driver.transaction === "function";
+function isBunSql(driver: unknown): driver is BunSqlDriver {
+  if (typeof driver !== "object" || driver === null) return false;
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+  const record = driver as Record<string, unknown>;
+  return (
+    "unsafe" in record &&
+    "transaction" in record &&
+    typeof record["unsafe"] === "function" &&
+    typeof record["transaction"] === "function"
+  );
 }
 
-function isPg(driver: any): boolean {
-  return typeof driver.query === "function";
+function isPg(driver: unknown): driver is PgClient | PgPool | PgPoolClient {
+  if (typeof driver !== "object" || driver === null) return false;
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+  const record = driver as Record<string, unknown>;
+  return "query" in record && typeof record["query"] === "function";
 }
 
 function createPostgresJsExecutor(sql: PostgresJsSql): QueryExecutor {
-  return {
-    all: (query, params) => sql.unsafe(query, params, { prepare: true }),
-    get: async (query, params) => {
-      const rows = await sql.unsafe(query, params, { prepare: true });
-      return rows[0];
-    },
-    run: async (query, params) => {
-      const res = await sql.unsafe(query, params, { prepare: true });
-      return { changes: (res as any).count ?? 0 };
-    },
-    transaction: (fn) => sql.begin((tx) => fn(createPostgresJsExecutor(tx))),
-  };
-}
-
-function createBunExecutor(sql: any): QueryExecutor {
   return {
     all: (query, params) => sql.unsafe(query, params),
     get: async (query, params) => {
@@ -144,47 +132,113 @@ function createBunExecutor(sql: any): QueryExecutor {
     },
     run: async (query, params) => {
       const res = await sql.unsafe(query, params);
-      return { changes: res.count ?? res.affectedRows ?? 0 };
+      const count = getPgQueryResultCount(res);
+      return { changes: count };
     },
-    transaction: (fn) => sql.transaction((tx: any) => fn(createBunExecutor(tx))),
+    transaction: (fn) => sql.begin((tx) => fn(createPostgresJsExecutor(tx))),
   };
 }
 
-function createPgExecutor(driver: any): QueryExecutor {
-  const cache = getPgCache(driver);
-  const executor: QueryExecutor = {
+function getPgQueryResultRows<T = unknown[]>(result: unknown): T {
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+  if (Array.isArray(result)) return result as T;
+  if (typeof result === "object" && result !== null && "rows" in result) {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+    return (result as Record<string, unknown>)["rows"] as T;
+  }
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+  return [] as T;
+}
+
+function getPgQueryResultCount(result: unknown): number {
+  if (typeof result === "object" && result !== null) {
+    const possibleProps = ["count", "rowCount", "rowsAffected"];
+    for (const prop of possibleProps) {
+      if (prop in result) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+        const val = (result as Record<string, unknown>)[prop];
+        if (typeof val === "number") return val;
+      }
+    }
+  }
+  return 0;
+}
+
+function getBunQueryResultCount(result: unknown): number {
+  if (typeof result === "object" && result !== null) {
+    const possibleProps = ["changes", "rowCount", "rowsAffected", "affectedRows"];
+    for (const prop of possibleProps) {
+      if (prop in result) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+        const val = (result as Record<string, unknown>)[prop];
+        if (typeof val === "number") return val;
+      }
+    }
+  }
+  return 0;
+}
+function createBunExecutor(sql: BunSqlDriver): QueryExecutor {
+  return {
+    all: (query, params) => sql.unsafe(query, params),
+    get: async (query, params) => {
+      const rows = await sql.unsafe(query, params);
+      return rows[0];
+    },
+    run: async (query, params) => {
+      const res = await sql.unsafe(query, params);
+      const count = getBunQueryResultCount(res);
+      return { changes: count };
+    },
+    transaction: (fn) => sql.transaction((tx) => fn(createBunExecutor(tx))),
+  };
+}
+
+function createPgExecutor(driver: PgClient | PgPool | PgPoolClient): QueryExecutor {
+  return {
     all: async (sql, params) => {
-      const query = getNamedQuery(sql, cache);
+      const query = getNamedQuery(sql);
       const res = await driver.query({ ...query, values: params });
-      return res.rows;
+      return getPgQueryResultRows(res);
     },
     get: async (sql, params) => {
-      const query = getNamedQuery(sql, cache);
+      const query = getNamedQuery(sql);
       const res = await driver.query({ ...query, values: params });
-      return res.rows[0];
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+      const rows = getPgQueryResultRows(res) as Record<string, unknown>[];
+      return rows[0];
     },
     run: async (sql, params) => {
-      const query = getNamedQuery(sql, cache);
+      const query = getNamedQuery(sql);
       const res = await driver.query({ ...query, values: params });
-      return { changes: res.rowCount ?? 0 };
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+      const typed = res as unknown as Record<string, unknown>;
+      const changes = typed["rowsAffected"] ?? typed["rowCount"] ?? 0;
+      return { changes: typeof changes === "number" ? changes : 0 };
     },
     transaction: async (fn) => {
-      const isPool = typeof driver.connect === "function";
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+      const poolDriver = driver as unknown as Record<string, unknown>;
+      const isPool = "release" in poolDriver && typeof poolDriver["release"] === "function";
       const client = isPool ? await driver.connect() : driver;
       try {
         await client.query("BEGIN");
-        const res = await fn(createPgExecutor(client));
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+        const pgClient = isPool ? (client as PgPoolClient) : (client as PgClient);
+        const res = await fn(createPgExecutor(pgClient));
         await client.query("COMMIT");
         return res;
       } catch (e) {
         await client.query("ROLLBACK");
         throw e;
       } finally {
-        if (isPool) client.release();
+        if (isPool) {
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+          const poolClient = client as PgPoolClient;
+          poolClient["release"]();
+        }
       }
     },
   };
-  return executor;
 }
 
 export function createPostgresExecutor(driver: PostgresDriver): QueryExecutor {

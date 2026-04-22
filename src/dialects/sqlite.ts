@@ -6,7 +6,7 @@ import type { Database as SqliteDatabase } from "sqlite";
 import type { Field } from "../types";
 import type { QueryExecutor, SqlDialect } from "./types";
 
-export type SqliteDriver = SqliteDatabase | BunDatabase | BetterSqlite3Database | any;
+export type SqliteDriver = SqliteDatabase | BunDatabase | BetterSqlite3Database;
 
 export const SqliteDialect: SqlDialect = {
   placeholder: () => "?",
@@ -35,7 +35,7 @@ export const SqliteDialect: SqlDialect = {
       let isIndex = true;
       for (let j = 0; j < segment.length; j++) {
         const c = segment.codePointAt(j);
-        if (c < 48 || c > 57) {
+        if (c === undefined || c < 48 || c > 57) {
           isIndex = false;
           break;
         }
@@ -53,40 +53,65 @@ export const SqliteDialect: SqlDialect = {
   },
 };
 
-function isSyncSqlite(driver: any): boolean {
-  return typeof driver.prepare === "function" && driver.get?.constructor.name !== "AsyncFunction";
+function isSyncSqlite(driver: unknown): driver is BunDatabase | BetterSqlite3Database {
+  if (typeof driver !== "object" || driver === null) return false;
+  const d = driver as unknown;
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+  const record = d as Record<string, unknown>;
+  return "prepare" in record && typeof record["prepare"] === "function";
 }
 
-function createSyncSqliteExecutor(driver: any): QueryExecutor {
+type SqliteStmt = {
+  all: (this: void, ...params: unknown[]) => unknown[];
+  get: (this: void, ...params: unknown[]) => unknown;
+  run: (this: void, ...params: unknown[]) => { changes: number };
+};
+
+function createSyncSqliteExecutor(driver: BunDatabase | BetterSqlite3Database): QueryExecutor {
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+  const driverObj = driver as { prepare: (sql: string) => SqliteStmt };
   return {
-    all: async (sql, params) => driver.prepare(sql).all(...(params ?? [])),
-    get: async (sql, params) => driver.prepare(sql).get(...(params ?? [])),
-    run: async (sql, params) => {
-      const res = driver.prepare(sql).run(...(params ?? []));
-      return { changes: res?.changes ?? 0 };
+    all: (sql, params) => {
+      const stmt = driverObj.prepare(sql);
+      const result = stmt.all(...(params ?? []));
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+      return Promise.resolve(result as Record<string, unknown>[]);
+    },
+    get: (sql, params) => {
+      const stmt = driverObj.prepare(sql);
+      const result = stmt.get(...(params ?? []));
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+      return Promise.resolve(result as Record<string, unknown> | undefined);
+    },
+    run: (sql, params) => {
+      const stmt = driverObj.prepare(sql);
+      const res = stmt.run(...(params ?? []));
+      return Promise.resolve({ changes: res.changes ?? 0 });
     },
     transaction: async (fn) => {
-      // Nested transactions stay on the current connection and use savepoints.
-      driver.prepare("BEGIN").run();
+      const begin = driverObj.prepare("BEGIN");
+      begin.run();
       try {
         const res = await fn(createSyncSqliteExecutor(driver));
-        driver.prepare("COMMIT").run();
+        const commit = driverObj.prepare("COMMIT");
+        commit.run();
         return res;
       } catch (e) {
-        driver.prepare("ROLLBACK").run();
+        const rollback = driverObj.prepare("ROLLBACK");
+        rollback.run();
         throw e;
       }
     },
   };
 }
 
-function createAsyncSqliteExecutor(driver: any): QueryExecutor {
+function createAsyncSqliteExecutor(driver: SqliteDatabase): QueryExecutor {
   return {
     all: (sql, params) => driver.all(sql, params),
     get: (sql, params) => driver.get(sql, params),
     run: async (sql, params) => {
       const res = await driver.run(sql, params);
-      return { changes: res?.changes ?? 0 };
+      return { changes: res.changes ?? 0 };
     },
     transaction: async (fn) => {
       // Nested transactions stay on the current connection and use savepoints.
@@ -105,5 +130,5 @@ function createAsyncSqliteExecutor(driver: any): QueryExecutor {
 
 export function createSqliteExecutor(driver: SqliteDriver): QueryExecutor {
   if (isSyncSqlite(driver)) return createSyncSqliteExecutor(driver);
-  return createAsyncSqliteExecutor(driver);
+  return createAsyncSqliteExecutor(driver as SqliteDatabase);
 }

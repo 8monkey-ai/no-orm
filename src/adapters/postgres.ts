@@ -15,8 +15,8 @@ export class PostgresAdapter<S extends Schema = Schema>
     );
   }
 
-  async transaction<T>(fn: (tx: Adapter<S>) => Promise<T>): Promise<T> {
-    return this.executor.transaction(async (innerExecutor) => {
+  transaction<T>(fn: (tx: Adapter<S>) => Promise<T>): Promise<T> {
+    return this.executor.transaction((innerExecutor) => {
       return fn(new PostgresAdapter(this.schema, innerExecutor));
     });
   }

@@ -24,7 +24,7 @@ describe("MemoryAdapter", () => {
 
   beforeEach(async () => {
     adapter = new MemoryAdapter(schema);
-    await adapter.migrate({ schema });
+    await adapter.migrate();
   });
 
   it("should create and find a record", async () => {
@@ -128,13 +128,14 @@ describe("MemoryAdapter", () => {
       data: { id: "u1", name: "Alice", age: 25, is_active: true, metadata: null },
     });
 
-    expect(() =>
+    // eslint-disable-next-line @typescript-eslint/await-thenable, @typescript-eslint/no-confusing-void-expression
+    await expect(
       adapter.update<"users", User>({
         model: "users",
         where: { field: "id", op: "eq", value: "u1" },
         data: { id: "u2" },
       }),
-    ).toThrow("Primary key updates are not supported.");
+    ).rejects.toThrow("Primary key updates are not supported.");
   });
 
   it("should delete a record", async () => {
@@ -288,7 +289,7 @@ describe("MemoryAdapter", () => {
       expect(found?.age).toBe(30);
     });
 
-    it("should throw error if primary key is missing in 'create' data", () => {
+    it("should throw error if primary key is missing in 'create' data", async () => {
       // Intentionally passing incomplete data to test validation
       // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
       const invalidData = {
@@ -296,13 +297,14 @@ describe("MemoryAdapter", () => {
         age: 20,
       } as unknown as User;
 
-      expect(() =>
+      // eslint-disable-next-line @typescript-eslint/await-thenable, @typescript-eslint/no-confusing-void-expression
+      await expect(
         adapter.upsert({
           model: "users",
           create: invalidData,
           update: { age: 21 },
         }),
-      ).toThrow("Missing primary key field: id");
+      ).rejects.toThrow("Missing primary key field: id");
     });
   });
 

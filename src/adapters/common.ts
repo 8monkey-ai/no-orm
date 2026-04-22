@@ -29,14 +29,15 @@ export function getPrimaryKeyFields(model: Model): string[] {
 /**
  * Extracts primary key values from a data object based on the model schema.
  */
-export function getIdentityValues(
+export function getIdentityValues<T extends Record<string, unknown>>(
   model: Model,
-  data: Record<string, unknown>,
-): Record<string, unknown> {
+  data: T,
+): Partial<T> {
   const pkFields = getPrimaryKeyFields(model);
-  const values: Record<string, unknown> = {};
+  const values: Partial<T> = {};
   for (let i = 0; i < pkFields.length; i++) {
-    const field = pkFields[i]!;
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+    const field = pkFields[i]! as FieldName<T>;
     const val = data[field];
     if (val === undefined) {
       throw new Error(`Missing primary key field: ${field}`);
@@ -52,6 +53,9 @@ export function validateJsonPath(path: string[]): string[] {
     // Faster validation without regex
     for (let j = 0; j < segment.length; j++) {
       const c = segment.codePointAt(j);
+      if (c === undefined) {
+        throw new Error(`Invalid JSON path segment: ${segment}`);
+      }
       const isAlpha = (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
       const isDigit = c >= 48 && c <= 57;
       const isUnderscore = c === 95;
@@ -68,34 +72,43 @@ export function validateJsonPath(path: string[]): string[] {
  */
 export function buildIdentityFilter<T extends Record<string, unknown>>(
   model: Model,
-  source: Record<string, unknown>,
+  source: Partial<T>,
 ): Where<T> {
   const pkFields = getPrimaryKeyFields(model);
+  if (pkFields.length === 0) {
+    throw new Error("Model has no primary key defined.");
+  }
+  if (pkFields.length === 1) {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+    const field = pkFields[0]! as FieldName<T>;
+    return {
+      field,
+      op: "eq" as const,
+      value: source[field],
+    };
+  }
+
   const clauses: Where<T>[] = [];
   for (let i = 0; i < pkFields.length; i++) {
-    const field = pkFields[i]!;
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+    const field = pkFields[i]! as FieldName<T>;
     clauses.push({
-      field: field as FieldName<T>,
+      field,
       op: "eq" as const,
       value: source[field],
     });
   }
 
-  if (clauses.length === 1) {
-    return clauses[0]!;
-  }
-
   return { and: clauses };
 }
-
-export function assertNoPrimaryKeyUpdates(
+export function assertNoPrimaryKeyUpdates<T extends Record<string, unknown>>(
   model: Model,
-  data: Partial<Record<string, unknown>>,
+  data: Partial<T>,
 ): void {
   const pkFields = getPrimaryKeyFields(model);
   for (let i = 0; i < pkFields.length; i++) {
     const field = pkFields[i]!;
-    if (data[field] !== undefined) {
+    if ((data as Record<string, unknown>)[field] !== undefined) {
       throw new Error("Primary key updates are not supported.");
     }
   }

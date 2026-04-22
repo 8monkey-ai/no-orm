@@ -1,62 +1,60 @@
-import type {
-  Adapter,
-  Cursor,
-  FieldName,
-  InferModel,
-  Schema,
-  Select,
-  SortBy,
-  Where,
-} from "../types";
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+const LRUCache = require("lru-cache");
+
+import type { Adapter, Cursor, InferModel, Schema, Select, SortBy, Where } from "../types";
 import {
   assertNoPrimaryKeyUpdates,
   getIdentityValues,
   getPrimaryKeyFields,
   isRecord,
-  mapNumeric,
 } from "./common";
 
-type Comparable = string | number;
 type RowData = Record<string, unknown>;
 
-let LRU: any;
-const lruPromise = import("lru-cache")
-  .then((m) => {
-    LRU = m.LRUCache;
-  })
-  .catch(() => {});
+const DEFAULT_MAX_SIZE = 1000;
+
+interface LRU {
+  has(key: string): boolean;
+  get(key: string): unknown;
+  set(key: string, value: unknown): void;
+  delete(key: string): void;
+  del(key: string): void;
+  forEach(cb: (value: unknown, key: string) => void): void;
+  entries?(): IterableIterator<[string, unknown]>;
+  keys?(): string[];
+  peek?(key: string): unknown;
+  size: number;
+}
 
 export interface MemoryAdapterOptions {
   maxSize?: number;
 }
 
 export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
-  private storage = new Map<string, any>();
-  private options: MemoryAdapterOptions;
+  private storage = new Map<keyof S, LRU>();
 
   constructor(
     private schema: S,
-    options: MemoryAdapterOptions = {},
-  ) {
-    this.options = options;
-  }
+    private options?: MemoryAdapterOptions,
+  ) {}
 
-  async migrate(): Promise<void> {
-    await lruPromise;
-    const keys = Object.keys(this.schema);
-    for (let i = 0; i < keys.length; i++) {
-      const name = keys[i]!;
-      if (!this.storage.has(name)) {
-        if (this.options.maxSize && LRU) {
-          this.storage.set(name, new LRU({ max: this.options.maxSize }));
-        } else {
-          this.storage.set(name, new Map());
-        }
+  migrate(): Promise<void> {
+    const keys = Object.keys(this.schema) as (keyof S)[];
+    for (const key of keys) {
+      const existing = this.storage.get(key);
+      if (existing === undefined) {
+        const max = this.options?.maxSize ?? DEFAULT_MAX_SIZE;
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion, @typescript-eslint/no-unsafe-member-access
+        const LRUClass = (LRUCache.default ?? LRUCache) as new (o: { max: number }) => LRU;
+        this.storage.set(key, new LRUClass({ max }));
       }
     }
+    return Promise.resolve();
   }
 
-  async transaction<T>(fn: (tx: Adapter<S>) => Promise<T>): Promise<T> {
+  transaction<T>(fn: (tx: Adapter<S>) => Promise<T>): Promise<T> {
     return fn(this);
   }
 
@@ -64,6 +62,7 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: { model: K; data: T; select?: Select<T> }): Promise<T> {
+    await Promise.resolve();
     const { model, data, select } = args;
     const modelStorage = this.getModelStorage(model);
     const pkValue = this.getPrimaryKeyString(model, data);
@@ -72,24 +71,29 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
       throw new Error(`Record with primary key ${pkValue} already exists in ${model}`);
     }
 
-    const record = Object.assign({}, data);
+    const record: RowData = { ...data };
     modelStorage.set(pkValue, record);
 
-    return this.applySelect(record as any, select);
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+    return this.applySelect(record as T, select);
   }
 
   async find<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: { model: K; where: Where<T>; select?: Select<T> }): Promise<T | null> {
+    await Promise.resolve();
     const { model, where, select } = args;
     const modelStorage = this.getModelStorage(model);
 
-    const values = Array.from(modelStorage.values());
-    for (let i = 0; i < values.length; i++) {
-      const record = values[i] as T;
-      if (this.evaluateWhere(where, record)) {
-        return this.applySelect(record, select);
+    for (const [, value] of this.getEntries(modelStorage)) {
+      if (
+        isRecord(value) &&
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+        (where === undefined || this.evaluateWhere(where as unknown as Where, value))
+      ) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+        return this.applySelect(value as T, select);
       }
     }
 
@@ -108,22 +112,28 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     offset?: number;
     cursor?: Cursor<T>;
   }): Promise<T[]> {
+    await Promise.resolve();
     const { model, where, select, sortBy, limit, offset, cursor } = args;
     const modelStorage = this.getModelStorage(model);
 
-    let results: T[] = [];
-    const rawValues = Array.from(modelStorage.values());
-    for (let i = 0; i < rawValues.length; i++) {
-      const record = rawValues[i] as T;
-      if (!where || this.evaluateWhere(where, record)) {
-        results.push(record);
+    const results: T[] = [];
+    for (const [, value] of this.getEntries(modelStorage)) {
+      if (
+        isRecord(value) &&
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+        (where === undefined || this.evaluateWhere(where as unknown as Where, value))
+      ) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+        results.push(value as T);
       }
     }
 
-    if (cursor) {
+    let processedResults = [...results];
+
+    if (cursor !== undefined) {
       const cursorValues = cursor.after as Record<string, unknown>;
-      const criteria = [];
-      if (sortBy && sortBy.length > 0) {
+      const criteria: { field: string; direction: "asc" | "desc"; path?: string[] }[] = [];
+      if (sortBy !== undefined && sortBy.length > 0) {
         for (let i = 0; i < sortBy.length; i++) {
           const s = sortBy[i]!;
           if (cursorValues[s.field] !== undefined) {
@@ -133,21 +143,21 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
       } else {
         const keys = Object.keys(cursorValues);
         for (let i = 0; i < keys.length; i++) {
-          criteria.push({ field: keys[i]!, direction: "asc" as const, path: undefined });
+          const k = keys[i]!;
+          criteria.push({ field: k, direction: "asc", path: undefined });
         }
       }
 
       if (criteria.length > 0) {
         const filtered: T[] = [];
-        for (let i = 0; i < results.length; i++) {
-          const record = results[i]!;
+        for (let i = 0; i < processedResults.length; i++) {
+          const record = processedResults[i]!;
           let match = false;
-          // Lexicographic keyset pagination:
-          // (a > ?) OR (a = ? AND b > ?) OR (a = ? AND b = ? AND c > ?)
           for (let j = 0; j < criteria.length; j++) {
             const curr = criteria[j]!;
-            const recordVal = this.getValue(record, curr.field as any, curr.path);
-            const cursorVal = cursorValues[curr.field as any];
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+            const recordVal = this.getValue(record as unknown as RowData, curr.field, curr.path);
+            const cursorVal = cursorValues[curr.field];
             const comp = this.compareValues(recordVal, cursorVal);
 
             if (comp === 0) continue;
@@ -158,16 +168,21 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
           }
           if (match) filtered.push(record);
         }
-        results = filtered;
+        processedResults = filtered;
       }
     }
 
-    if (sortBy && sortBy.length > 0) {
-      results.sort((a, b) => {
+    if (sortBy !== undefined && sortBy.length > 0) {
+      processedResults.sort((a, b) => {
         for (let i = 0; i < sortBy.length; i++) {
-          const { field, direction, path } = sortBy[i]!;
-          const valA = this.getValue(a, field, path);
-          const valB = this.getValue(b, field, path);
+          const s = sortBy[i]!;
+          const field = s.field;
+          const direction = s.direction;
+          const path = s.path;
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+          const valA = this.getValue(a as unknown as RowData, field, path);
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+          const valB = this.getValue(b as unknown as RowData, field, path);
           if (valA === valB) continue;
           const comparison = this.compareValues(valA, valB);
           if (comparison === 0) continue;
@@ -178,32 +193,35 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     }
 
     const start = offset ?? 0;
-    const end = limit === undefined ? results.length : start + limit;
-    const finalResults: T[] = [];
-    for (let i = start; i < end && i < results.length; i++) {
-      finalResults.push(this.applySelect(results[i]!, select));
+    const end = limit === undefined ? processedResults.length : start + limit;
+    const paginatedResults: T[] = [];
+    for (let i = start; i < end && i < processedResults.length; i++) {
+      paginatedResults.push(this.applySelect(processedResults[i]!, select));
     }
 
-    return finalResults;
+    return paginatedResults;
   }
 
   async update<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: { model: K; where: Where<T>; data: Partial<T> }): Promise<T | null> {
+    await Promise.resolve();
     const { model, where, data } = args;
     const modelSpec = this.getModel(model);
     assertNoPrimaryKeyUpdates(modelSpec, data);
     const modelStorage = this.getModelStorage(model);
 
-    const entries = Array.from(modelStorage.entries());
-    for (let i = 0; i < entries.length; i++) {
-      const [pk, record] = entries[i]!;
-      const modelRecord = record as T;
-      if (this.evaluateWhere(where, modelRecord)) {
-        const updated = Object.assign({}, modelRecord, data);
-        modelStorage.set(pk, updated);
-        return this.applySelect(updated as any);
+    for (const [key, value] of this.getEntries(modelStorage)) {
+      if (
+        isRecord(value) &&
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+        this.evaluateWhere(where as unknown as Where, value)
+      ) {
+        const updated: RowData = { ...(value as object), ...(data as object) };
+        modelStorage.set(key, updated);
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+        return this.applySelect(updated as T);
       }
     }
 
@@ -214,24 +232,33 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: { model: K; where?: Where<T>; data: Partial<T> }): Promise<number> {
+    await Promise.resolve();
     const { model, where, data } = args;
     const modelSpec = this.getModel(model);
     assertNoPrimaryKeyUpdates(modelSpec, data);
     const modelStorage = this.getModelStorage(model);
-    let count = 0;
 
-    const entries = Array.from(modelStorage.entries());
-    for (let i = 0; i < entries.length; i++) {
-      const [pk, record] = entries[i]!;
-      const modelRecord = record as T;
-      if (where === undefined || this.evaluateWhere(where, modelRecord)) {
-        const updated = Object.assign({}, modelRecord, data);
-        modelStorage.set(pk, updated);
-        count++;
+    const updates: { key: string; record: T }[] = [];
+    for (const [key, value] of this.getEntries(modelStorage)) {
+      if (
+        isRecord(value) &&
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+        (where === undefined || this.evaluateWhere(where as unknown as Where, value))
+      ) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+        updates.push({ key, record: value as T });
       }
     }
 
-    return count;
+    for (let i = 0; i < updates.length; i++) {
+      const item = updates[i]!;
+      const key = item.key;
+      const record = item.record;
+      const updated: RowData = { ...(record as object), ...(data as object) };
+      modelStorage.set(key, updated);
+    }
+
+    return updates.length;
   }
 
   async upsert<
@@ -244,6 +271,7 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     where?: Where<T>;
     select?: Select<T>;
   }): Promise<T> {
+    await Promise.resolve();
     const { model, create, update, where, select } = args;
     const modelSpec = this.getModel(model);
     assertNoPrimaryKeyUpdates(modelSpec, update);
@@ -252,14 +280,19 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     const modelStorage = this.getModelStorage(model);
     const existing = modelStorage.get(pkValue);
 
-    if (existing !== undefined) {
-      const modelExisting = existing as T;
-      if (where === undefined || this.evaluateWhere(where, modelExisting)) {
-        const updated = Object.assign({}, modelExisting, update);
+    if (existing !== undefined && isRecord(existing)) {
+      if (
+        where === undefined ||
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+        this.evaluateWhere(where as unknown as Where, existing)
+      ) {
+        const updated: RowData = { ...(existing as object), ...(update as object) };
         modelStorage.set(pkValue, updated);
-        return this.applySelect(updated as any, select);
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+        return this.applySelect(updated as T, select);
       }
-      return this.applySelect(modelExisting, select);
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+      return this.applySelect(existing as T, select);
     }
 
     return this.create({ model, data: create, select });
@@ -269,14 +302,17 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: { model: K; where: Where<T> }): Promise<void> {
+    await Promise.resolve();
     const { model, where } = args;
     const modelStorage = this.getModelStorage(model);
 
-    const entries = Array.from(modelStorage.entries());
-    for (let i = 0; i < entries.length; i++) {
-      const [pk, record] = entries[i]!;
-      if (this.evaluateWhere(where, record as T)) {
-        modelStorage.delete(pk);
+    for (const [key, value] of this.getEntries(modelStorage)) {
+      if (
+        isRecord(value) &&
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+        this.evaluateWhere(where as unknown as Where, value)
+      ) {
+        this.lruDelete(modelStorage, key);
         return;
       }
     }
@@ -286,50 +322,86 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: { model: K; where?: Where<T> }): Promise<number> {
+    await Promise.resolve();
     const { model, where } = args;
     const modelStorage = this.getModelStorage(model);
-    let count = 0;
+    const toDelete: string[] = [];
 
-    const entries = Array.from(modelStorage.entries());
-    for (let i = 0; i < entries.length; i++) {
-      const [pk, record] = entries[i]!;
-      if (where === undefined || this.evaluateWhere(where, record as T)) {
-        modelStorage.delete(pk);
-        count++;
+    for (const [key, value] of this.getEntries(modelStorage)) {
+      if (
+        isRecord(value) &&
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+        (where === undefined || this.evaluateWhere(where as unknown as Where, value))
+      ) {
+        toDelete.push(key);
       }
     }
 
-    return count;
+    for (let i = 0; i < toDelete.length; i++) {
+      this.lruDelete(modelStorage, toDelete[i]!);
+    }
+
+    return toDelete.length;
   }
 
   async count<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: { model: K; where?: Where<T> }): Promise<number> {
+    await Promise.resolve();
     const { model, where } = args;
     const modelStorage = this.getModelStorage(model);
 
     if (where === undefined) return modelStorage.size;
 
     let count = 0;
-    const values = Array.from(modelStorage.values());
-    for (let i = 0; i < values.length; i++) {
-      if (this.evaluateWhere(where, values[i] as T)) {
+    for (const [, value] of this.getEntries(modelStorage)) {
+      if (
+        isRecord(value) &&
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+        this.evaluateWhere(where as unknown as Where, value)
+      ) {
         count++;
       }
     }
     return count;
   }
 
-  private getModelStorage(model: string): any {
+  private lruDelete(lru: LRU, key: string): void {
+    if (typeof lru.delete === "function") {
+      lru.delete(key);
+    } else if (typeof lru.del === "function") {
+      lru.del(key);
+    }
+  }
+
+  private *getEntries(lru: LRU): IterableIterator<[string, unknown]> {
+    if (typeof lru.entries === "function") {
+      yield* lru.entries();
+    } else if (typeof lru.keys === "function") {
+      const keys = lru.keys();
+      for (let i = 0; i < keys.length; i++) {
+        const k = keys[i]!;
+        const v = typeof lru.peek === "function" ? lru.peek(k) : lru.get(k);
+        yield [k, v];
+      }
+    } else {
+      const entries: [string, unknown][] = [];
+      lru.forEach((v, k) => entries.push([k, v]));
+      yield* entries;
+    }
+  }
+
+  private getModelStorage<K extends keyof S & string>(model: K): LRU {
     const storage = this.storage.get(model);
-    if (!storage) throw new Error(`Model ${model} not initialized. Call migrate() first.`);
+    if (storage === undefined)
+      throw new Error(`Model ${model} not initialized. Call migrate() first.`);
     return storage;
   }
 
-  private getModel(model: string): S[keyof S] {
+  private getModel<K extends keyof S & string>(model: K): S[K] {
     const spec = this.schema[model];
-    if (!spec) throw new Error(`Model ${model} not found in schema`);
+    if (spec === undefined) throw new Error(`Model ${model} not found in schema`);
     return spec;
   }
 
@@ -340,47 +412,65 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     let res = "";
     for (let i = 0; i < pkFields.length; i++) {
       if (i > 0) res += "|";
-      res += String(pkValues[pkFields[i]!] ?? "");
+      const pkField = pkFields[i]!;
+      const val = pkValues[pkField];
+      if (val !== null && val !== undefined) {
+        if (typeof val === "object") {
+          res += JSON.stringify(val);
+        } else {
+          // eslint-disable-next-line @typescript-eslint/no-base-to-string
+          res += String(val);
+        }
+      }
     }
     return res;
   }
 
   private applySelect<T extends RowData>(record: T, select?: Select<T>): T {
-    if (!select) return Object.assign({}, record);
-    const res = {} as T;
-    for (let i = 0; i < select.length; i++) {
-      const k = select[i]! as string;
-      (res as any)[k] = record[k] ?? null;
+    if (select === undefined) {
+      return { ...record };
     }
-    return res;
+    const res: RowData = {};
+    for (let i = 0; i < select.length; i++) {
+      const k = select[i]!;
+      res[k] = record[k] ?? null;
+    }
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+    return res as T;
   }
 
-  private getValue(record: any, field: string, path?: string[]): unknown {
+  private getValue(record: RowData, field: string, path?: string[]): unknown {
     let val = record[field];
-    if (path && path.length > 0) {
+    if (path !== undefined && path.length > 0) {
       for (let i = 0; i < path.length; i++) {
         if (!isRecord(val)) return undefined;
-        val = val[path[i]!];
+        const subKey = path[i]!;
+        val = val[subKey];
       }
     }
     return val;
   }
 
-  private evaluateWhere(where: Where<any>, record: any): boolean {
+  private evaluateWhere(where: Where, record: RowData): boolean {
     if ("and" in where) {
-      for (let i = 0; i < where.and.length; i++) {
-        if (!this.evaluateWhere(where.and[i]!, record)) return false;
+      const and = where.and;
+      for (let i = 0; i < and.length; i++) {
+        if (!this.evaluateWhere(and[i]!, record)) return false;
       }
       return true;
     }
     if ("or" in where) {
-      for (let i = 0; i < where.or.length; i++) {
-        if (this.evaluateWhere(where.or[i]!, record)) return true;
+      const or = where.or;
+      for (let i = 0; i < or.length; i++) {
+        if (this.evaluateWhere(or[i]!, record)) return true;
       }
       return false;
     }
 
-    const { field, op, value, path } = where as any;
+    const field = where.field;
+    const op = where.op;
+    const value = where.value;
+    const path = where.path;
     const recordVal = this.getValue(record, field, path);
 
     switch (op) {
@@ -406,12 +496,18 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
 
   private compareValues(left: unknown, right: unknown): number {
     if (left === right) return 0;
-    if (left === null || left === undefined) return -1;
-    if (right === null || right === undefined) return 1;
+    if (left === undefined) return -1;
+    if (right === undefined) return 1;
+    if (left === null) return -1;
+    if (right === null) return 1;
     if (typeof left !== typeof right) return 0;
-    if (typeof left === "string" || typeof left === "number") {
-      if (left < (right as any)) return -1;
-      if (left > (right as any)) return 1;
+    if (typeof left === "string" && typeof right === "string") {
+      if (left < right) return -1;
+      if (left > right) return 1;
+    }
+    if (typeof left === "number" && typeof right === "number") {
+      if (left < right) return -1;
+      if (left > right) return 1;
     }
     return 0;
   }
