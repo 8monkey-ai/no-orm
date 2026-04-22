@@ -57,11 +57,13 @@ await adapter.migrate();
 
 ### Postgres
 
+Supports `pg`, `postgres.js`, and Bun SQL.
+
 ```ts
-import { SQL } from "bun";
+import postgres from "postgres"; // or import { Pool } from "pg"
 import { PostgresAdapter } from "@8monkey/no-orm/adapters/postgres";
 
-const sql = new SQL(process.env.POSTGRES_URL!);
+const sql = postgres(process.env.POSTGRES_URL!);
 const adapter = new PostgresAdapter(schema, sql);
 
 await adapter.migrate();
@@ -72,8 +74,8 @@ await adapter.migrate();
 ```ts
 import { MemoryAdapter } from "@8monkey/no-orm/adapters/memory";
 
-const adapter = new MemoryAdapter(schema);
-await adapter.migrate({ schema });
+const adapter = new MemoryAdapter(schema, { maxSize: 100 });
+await adapter.migrate();
 ```
 
 ## CRUD

@@ -72,7 +72,9 @@
   },
   "peerDependencies": {
     "better-sqlite3": "^11.0.0",
+    "lru-cache": "^11.0.0",
     "pg": "^8.0.0",
+    "postgres": "^3.4.0",
     "sqlite": "^5.0.0",
     "sqlite3": "^5.0.0"
   },
@@ -80,7 +82,13 @@
     "better-sqlite3": {
       "optional": true
     },
+    "lru-cache": {
+      "optional": true
+    },
     "pg": {
+      "optional": true
+    },
+    "postgres": {
       "optional": true
     },
     "sqlite": {

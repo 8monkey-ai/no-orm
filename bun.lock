@@ -16,13 +16,17 @@
       },
       "peerDependencies": {
         "better-sqlite3": "^11.0.0",
+        "lru-cache": "^11.0.0",
         "pg": "^8.0.0",
+        "postgres": "^3.4.0",
         "sqlite": "^5.0.0",
         "sqlite3": "^5.0.0",
       },
       "optionalPeers": [
         "better-sqlite3",
+        "lru-cache",
         "pg",
+        "postgres",
         "sqlite",
         "sqlite3",
       ],
