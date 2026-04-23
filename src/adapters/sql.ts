@@ -58,6 +58,8 @@ export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S
     protected dialect: SqlDialect,
   ) {}
 
+  abstract transaction<T>(fn: (tx: Adapter<S>) => Promise<T>): Promise<T>;
+
   async migrate(): Promise<void> {
     const models = Object.entries(this.schema);
 

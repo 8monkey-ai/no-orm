@@ -9,19 +9,7 @@ type TransactionSql = postgres.TransactionSql;
 
 export type PostgresDriver = PgClient | PgPool | PgPoolClient | PostgresJsSql | TransactionSql;
 
-// --- Prepared statement name cache for pg driver ---
-// Reuses statement names per SQL string to benefit from server-side prepared statements.
-const pgStatementCache = new Map<string, string>();
-let queryCount = 0;
-
-function getNamedQuery(sql: string): { name: string; text: string } {
-  let name = pgStatementCache.get(sql);
-  if (name === undefined) {
-    name = `no_orm_${queryCount++}`;
-    pgStatementCache.set(sql, name);
-  }
-  return { name, text: sql };
-}
+const MAX_CACHE_SIZE = 100;
 
 // --- Dialect ---
 
@@ -113,21 +101,52 @@ function isPg(driver: PostgresDriver): driver is PgClient | PgPool | PgPoolClien
 
 // --- Executor factories ---
 
-/**
- * Bun SQL and postgres.js both use `unsafe()` for raw queries.
- * Both drivers accept arrays of primitives at runtime. We use a structural
- * approach via Record<string, unknown> to avoid driver-specific type gymnastics.
- */
-// eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- structural duck-typing for multi-driver support
-function createUnsafeExecutor(
-  sql: Record<string, unknown>,
-  beginFn: (cb: (tx: Record<string, unknown>) => Promise<unknown>) => Promise<unknown>,
-): QueryExecutor {
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- extracting unsafe() from structurally-typed driver
-  const unsafeFn = sql["unsafe"] as (
+// postgres.js: uses `sql.unsafe(query, params, { prepare: true })` for server-side
+// prepared statements. The driver manages statement name caching internally.
+// Works for both Sql (top-level) and TransactionSql (inside begin/savepoint) since
+// both extend ISql which provides `unsafe()`.
+function createPostgresJsExecutor(sql: postgres.Sql | postgres.TransactionSql): QueryExecutor {
+  const run = (query: string, params?: unknown[]) =>
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- postgres.js params type is narrower than unknown[]
+    sql.unsafe(query, params as postgres.ParameterOrJSON<never>[], { prepare: true });
+
+  return {
+    all: async (query, params) => {
+      const rows = await run(query, params);
+      return rows as Record<string, unknown>[];
+    },
+    get: async (query, params) => {
+      const rows = await run(query, params);
+      return rows[0] as Record<string, unknown> | undefined;
+    },
+    run: async (query, params) => {
+      const rows = await run(query, params);
+      return { changes: rows.count ?? 0 };
+    },
+    transaction: <T>(fn: (executor: QueryExecutor) => Promise<T>) => {
+      // Top-level Sql uses begin(); TransactionSql uses savepoint() for nesting
+      if ("begin" in sql) {
+        // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- UnwrapPromiseArray<T> = T for single promises
+        return sql.begin((tx) => fn(createPostgresJsExecutor(tx))) as Promise<T>;
+      }
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- same as above
+      return sql.savepoint((tx) => fn(createPostgresJsExecutor(tx))) as Promise<T>;
+    },
+  };
+}
+
+// Bun SQL: uses `sql.unsafe(query, params)`. No prepare option — the driver
+// manages prepared statements internally.
+function createBunSqlExecutor(driver: Record<string, unknown>): QueryExecutor {
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- extracting unsafe() from Bun SQL driver
+  const unsafeFn = driver["unsafe"] as (
     query: string,
     params?: unknown[],
   ) => Promise<Record<string, unknown>[] & { count?: number }>;
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- extracting transaction() from Bun SQL driver
+  const transactionFn = driver["transaction"] as (
+    cb: (tx: unknown) => Promise<unknown>,
+  ) => Promise<unknown>;
 
   return {
     all: (query, params) => unsafeFn(query, params),
@@ -141,48 +160,41 @@ function createUnsafeExecutor(
     },
     transaction: <T>(fn: (executor: QueryExecutor) => Promise<T>) =>
       // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Promise<unknown> -> Promise<T> at executor boundary
-      beginFn((tx) => fn(createUnsafeExecutor(tx, beginFn))) as Promise<T>,
+      transactionFn((tx) => fn(createBunSqlExecutor(tx as Record<string, unknown>))) as Promise<T>,
   };
 }
 
-function createPostgresJsExecutor(sql: PostgresJsSql): QueryExecutor {
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- postgres.js Sql -> Record for createUnsafeExecutor
-  const driver = sql as unknown as Record<string, unknown>;
-  return createUnsafeExecutor(driver, (cb) =>
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- TransactionSql -> Record for createUnsafeExecutor
-    sql.begin((tx) => cb(tx as unknown as Record<string, unknown>)),
-  );
-}
-
-function createBunSqlExecutor(driver: Record<string, unknown>): QueryExecutor {
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Bun SQL transaction function extraction
-  const transactionFn = driver["transaction"] as (
-    cb: (tx: unknown) => Promise<unknown>,
-  ) => Promise<unknown>;
-  return createUnsafeExecutor(driver, (cb) =>
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Bun SQL tx -> Record
-    transactionFn((tx) => cb(tx as Record<string, unknown>)),
-  );
-}
-
+// pg: uses named queries with a bounded LRU cache for server-side prepared
+// statement reuse. Each unique SQL string gets a stable name (e.g. `q_0`).
 function createPgExecutor(driver: PgClient | PgPool | PgPoolClient): QueryExecutor {
+  const cache = new Map<string, string>();
+  let count = 0;
+
+  function getQuery(sql: string, values?: unknown[]) {
+    let name = cache.get(sql);
+    if (name === undefined) {
+      // Evict oldest entry when cache is full
+      if (cache.size >= MAX_CACHE_SIZE) {
+        const first = cache.keys().next();
+        if (first.done !== true) cache.delete(first.value);
+      }
+      name = `q_${count++}`;
+      cache.set(sql, name);
+    }
+    return { name, text: sql, values };
+  }
+
   return {
     all: async (sql, params) => {
-      const res = await driver.query<Record<string, unknown>>({
-        ...getNamedQuery(sql),
-        values: params,
-      });
+      const res = await driver.query<Record<string, unknown>>(getQuery(sql, params));
       return res.rows;
     },
     get: async (sql, params) => {
-      const res = await driver.query<Record<string, unknown>>({
-        ...getNamedQuery(sql),
-        values: params,
-      });
+      const res = await driver.query<Record<string, unknown>>(getQuery(sql, params));
       return res.rows[0];
     },
     run: async (sql, params) => {
-      const res = await driver.query({ ...getNamedQuery(sql), values: params });
+      const res = await driver.query(getQuery(sql, params));
       return { changes: res.rowCount ?? 0 };
     },
     transaction: async (fn) => {

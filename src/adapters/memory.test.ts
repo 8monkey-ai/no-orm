@@ -162,11 +162,26 @@ describe("MemoryAdapter", () => {
   });
 
   it("should support offset pagination", async () => {
-    await adapter.create({ model: "users", data: { id: "u1", name: "User1", age: 10, is_active: true, metadata: null } });
-    await adapter.create({ model: "users", data: { id: "u2", name: "User2", age: 20, is_active: true, metadata: null } });
-    await adapter.create({ model: "users", data: { id: "u3", name: "User3", age: 30, is_active: true, metadata: null } });
-    await adapter.create({ model: "users", data: { id: "u4", name: "User4", age: 40, is_active: true, metadata: null } });
-    await adapter.create({ model: "users", data: { id: "u5", name: "User5", age: 50, is_active: true, metadata: null } });
+    await adapter.create({
+      model: "users",
+      data: { id: "u1", name: "User1", age: 10, is_active: true, metadata: null },
+    });
+    await adapter.create({
+      model: "users",
+      data: { id: "u2", name: "User2", age: 20, is_active: true, metadata: null },
+    });
+    await adapter.create({
+      model: "users",
+      data: { id: "u3", name: "User3", age: 30, is_active: true, metadata: null },
+    });
+    await adapter.create({
+      model: "users",
+      data: { id: "u4", name: "User4", age: 40, is_active: true, metadata: null },
+    });
+    await adapter.create({
+      model: "users",
+      data: { id: "u5", name: "User5", age: 50, is_active: true, metadata: null },
+    });
 
     const page = await adapter.findMany({
       model: "users",

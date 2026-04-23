@@ -1,12 +1,7 @@
 import { LRUCache } from "lru-cache";
 
 import type { Adapter, Cursor, InferModel, Schema, Select, SortBy, Where } from "../types";
-import {
-  assertNoPrimaryKeyUpdates,
-  getIdentityValues,
-  getPrimaryKeyFields,
-  isRecord,
-} from "./common";
+import { assertNoPrimaryKeyUpdates, getIdentityValues, getPrimaryKeyFields } from "./common";
 
 type RowData = Record<string, unknown>;
 type ModelCache = LRUCache<string, RowData>;
@@ -39,10 +34,11 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     return fn(this);
   }
 
-  create<
-    K extends keyof S & string,
-    T extends Record<string, unknown> = InferModel<S[K]>,
-  >(args: { model: K; data: T; select?: Select<T> }): Promise<T> {
+  create<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
+    model: K;
+    data: T;
+    select?: Select<T>;
+  }): Promise<T> {
     const { model, data, select } = args;
     const cache = this.getModelStorage(model);
     const pkValue = this.getPrimaryKeyString(model, data);
@@ -56,10 +52,11 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     return Promise.resolve(this.applySelect<T>(record, select));
   }
 
-  find<
-    K extends keyof S & string,
-    T extends Record<string, unknown> = InferModel<S[K]>,
-  >(args: { model: K; where: Where<T>; select?: Select<T> }): Promise<T | null> {
+  find<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
+    model: K;
+    where: Where<T>;
+    select?: Select<T>;
+  }): Promise<T | null> {
     const { model, where, select } = args;
     const cache = this.getModelStorage(model);
 
@@ -71,10 +68,7 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     return Promise.resolve(null);
   }
 
-  findMany<
-    K extends keyof S & string,
-    T extends Record<string, unknown> = InferModel<S[K]>,
-  >(args: {
+  findMany<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
     model: K;
     where?: Where<T>;
     select?: Select<T>;
@@ -112,10 +106,11 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     return Promise.resolve(out);
   }
 
-  update<
-    K extends keyof S & string,
-    T extends Record<string, unknown> = InferModel<S[K]>,
-  >(args: { model: K; where: Where<T>; data: Partial<T> }): Promise<T | null> {
+  update<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
+    model: K;
+    where: Where<T>;
+    data: Partial<T>;
+  }): Promise<T | null> {
     const { model, where, data } = args;
     assertNoPrimaryKeyUpdates(this.getModel(model), data);
     const cache = this.getModelStorage(model);
@@ -152,10 +147,7 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     return Promise.resolve(matches.length);
   }
 
-  upsert<
-    K extends keyof S & string,
-    T extends Record<string, unknown> = InferModel<S[K]>,
-  >(args: {
+  upsert<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
     model: K;
     create: T;
     update: Partial<T>;
@@ -182,10 +174,10 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     return this.create({ model, data: create, select });
   }
 
-  delete<
-    K extends keyof S & string,
-    T extends Record<string, unknown> = InferModel<S[K]>,
-  >(args: { model: K; where: Where<T> }): Promise<void> {
+  delete<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
+    model: K;
+    where: Where<T>;
+  }): Promise<void> {
     const { model, where } = args;
     const cache = this.getModelStorage(model);
 
@@ -217,10 +209,10 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     return Promise.resolve(toDelete.length);
   }
 
-  count<
-    K extends keyof S & string,
-    T extends Record<string, unknown> = InferModel<S[K]>,
-  >(args: { model: K; where?: Where<T> }): Promise<number> {
+  count<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
+    model: K;
+    where?: Where<T>;
+  }): Promise<number> {
     const { model, where } = args;
     const cache = this.getModelStorage(model);
 
@@ -320,10 +312,7 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
    * The `as T` casts are intentional: storage holds RowData but the adapter
    * interface promises T. This is the single boundary where the cast occurs.
    */
-  private applySelect<T extends Record<string, unknown>>(
-    record: RowData,
-    select?: Select<T>,
-  ): T {
+  private applySelect<T extends Record<string, unknown>>(record: RowData, select?: Select<T>): T {
     // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- RowData -> T at adapter boundary
     if (select === undefined) return Object.assign({}, record) as T;
     const res: RowData = {};
@@ -339,18 +328,15 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     let val: unknown = record[field];
     if (path !== undefined && path.length > 0) {
       for (let i = 0; i < path.length; i++) {
-        if (!isRecord(val)) return undefined;
-        val = val[path[i]!];
+        if (typeof val !== "object" || val === null || Array.isArray(val)) return undefined;
+        // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- narrowed by object check above
+        val = (val as RowData)[path[i]!];
       }
     }
     return val;
   }
 
-  private applyCursor(
-    results: RowData[],
-    cursor: Cursor,
-    sortBy?: SortBy[],
-  ): RowData[] {
+  private applyCursor(results: RowData[], cursor: Cursor, sortBy?: SortBy[]): RowData[] {
     const cursorValues = cursor.after as Record<string, unknown>;
     const criteria: { field: string; direction: "asc" | "desc"; path?: string[] }[] = [];
 

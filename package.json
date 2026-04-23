@@ -59,14 +59,12 @@
     "check": "bun lint && bun typecheck",
     "fix": "bun lint:staged && bun format:staged"
   },
-  "dependencies": {
-    "lru-cache": "^11.0.0"
-  },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/bun": "^1.3.12",
     "@types/pg": "^8.11.11",
     "@types/sqlite3": "^5.1.0",
+    "lru-cache": "^11.0.0",
     "oxfmt": "^0.44.0",
     "oxlint": "^1.59.0",
     "oxlint-tsgolint": "^0.20.0",
@@ -76,6 +74,7 @@
   },
   "peerDependencies": {
     "better-sqlite3": "^11.0.0",
+    "lru-cache": "^11.0.0",
     "pg": "^8.0.0",
     "postgres": "^3.4.0",
     "sqlite": "^5.0.0",
@@ -83,6 +82,9 @@
   },
   "peerDependenciesMeta": {
     "better-sqlite3": {
+      "optional": true
+    },
+    "lru-cache": {
       "optional": true
     },
     "pg": {

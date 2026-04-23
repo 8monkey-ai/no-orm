@@ -1,4 +1,5 @@
 import type { Database as BunDatabase } from "bun:sqlite";
+
 import type { Database as BetterSqlite3Database } from "better-sqlite3";
 import type { Database as SqliteDatabase } from "sqlite";
 
@@ -54,6 +55,8 @@ export const SqliteDialect: SqlDialect = {
   },
 };
 
+const MAX_CACHE_SIZE = 100;
+
 // --- Driver detection and executors ---
 
 // better-sqlite3 and bun:sqlite are synchronous — they have `prepare` returning a statement
@@ -67,38 +70,57 @@ function isSyncSqlite(driver: SqliteDriver): driver is BunDatabase | BetterSqlit
  * Structural interface for the shared subset of BunDatabase and BetterSqlite3Database
  * `prepare()` APIs. Their full type signatures differ but both satisfy this shape.
  */
+type SyncStatement = {
+  all(...params: unknown[]): unknown[];
+  get(...params: unknown[]): unknown;
+  run(...params: unknown[]): { changes: number };
+};
+
 interface SyncDriver {
-  prepare(sql: string): {
-    all(...params: unknown[]): unknown[];
-    get(...params: unknown[]): unknown;
-    run(...params: unknown[]): { changes: number };
-  };
+  prepare(sql: string): SyncStatement;
 }
 
+// Caches compiled Statement objects per SQL string to avoid re-parsing on every query.
+// Uses a simple Map with FIFO eviction at MAX_CACHE_SIZE.
 function createSyncSqliteExecutor(driver: SyncDriver): QueryExecutor {
+  const cache = new Map<string, SyncStatement>();
+
+  function getStmt(sql: string): SyncStatement {
+    let stmt = cache.get(sql);
+    if (stmt === undefined) {
+      if (cache.size >= MAX_CACHE_SIZE) {
+        const first = cache.keys().next();
+        if (first.done !== true) cache.delete(first.value);
+      }
+      stmt = driver.prepare(sql);
+      cache.set(sql, stmt);
+    }
+    return stmt;
+  }
+
   return {
     all: (sql, params) => {
-      const result = driver.prepare(sql).all(...(params ?? []));
+      const result = getStmt(sql).all(...(params ?? []));
       // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- SQLite rows are plain objects
       return Promise.resolve(result as Record<string, unknown>[]);
     },
     get: (sql, params) => {
-      const result = driver.prepare(sql).get(...(params ?? []));
+      const result = getStmt(sql).get(...(params ?? []));
       // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- SQLite row is a plain object or undefined
       return Promise.resolve(result as Record<string, unknown> | undefined);
     },
     run: (sql, params) => {
-      const res = driver.prepare(sql).run(...(params ?? []));
+      const res = getStmt(sql).run(...(params ?? []));
       return Promise.resolve({ changes: res.changes ?? 0 });
     },
     transaction: async (fn) => {
-      driver.prepare("BEGIN").run();
+      getStmt("BEGIN").run();
       try {
         const res = await fn(createSyncSqliteExecutor(driver));
-        driver.prepare("COMMIT").run();
+        getStmt("COMMIT").run();
         return res;
       } catch (e) {
-        driver.prepare("ROLLBACK").run();
+        getStmt("ROLLBACK").run();
         throw e;
       }
     },

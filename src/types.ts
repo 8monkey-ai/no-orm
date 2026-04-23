@@ -58,13 +58,13 @@ export interface Adapter<S extends Schema = Schema> {
   /**
    * Initializes the database schema. Should be idempotent.
    */
-  migrate?(args: { schema: S }): Promise<void>;
+  migrate(): Promise<void>;
 
   /**
    * Executes a callback within a database transaction.
    * Implementation may vary by adapter (e.g., in-memory vs SQL).
    */
-  transaction?<T>(fn: (tx: Adapter<S>) => Promise<T>): Promise<T>;
+  transaction<T>(fn: (tx: Adapter<S>) => Promise<T>): Promise<T>;
 
   /**
    * Inserts a new record.
@@ -107,7 +107,7 @@ export interface Adapter<S extends Schema = Schema> {
    * If the record exists, 'update' is applied only if it satisfies the optional 'where' predicate.
    * If the record does not exist, 'create' is applied.
    */
-  upsert?<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
+  upsert<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
     model: K;
     create: T;
     update: Partial<T>;
@@ -127,7 +127,7 @@ export interface Adapter<S extends Schema = Schema> {
    * Deletes multiple records matching the 'where' clause.
    * @returns The number of records deleted.
    */
-  deleteMany?<
+  deleteMany<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: {
@@ -160,7 +160,7 @@ export interface Adapter<S extends Schema = Schema> {
   /**
    * Returns the count of records matching the 'where' clause.
    */
-  count?<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
+  count<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
     model: K;
     where?: Where<T>;
   }): Promise<number>;

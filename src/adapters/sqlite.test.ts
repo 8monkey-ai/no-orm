@@ -316,7 +316,6 @@ describe("SqliteAdapter", () => {
 
     it("should handle nested transactions with savepoints", async () => {
       await adapter.transaction(async (outer) => {
-        if (!outer.transaction) throw new Error("Transactions not supported");
         await outer.create({
           model: "users",
           data: { id: "n1", name: "Outer1", age: 20, is_active: true, metadata: null, tags: null },
