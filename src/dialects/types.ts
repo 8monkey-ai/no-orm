@@ -31,8 +31,11 @@ export interface SqlDialect {
 }
 
 export function isQueryExecutor(obj: unknown): obj is QueryExecutor {
-  if (obj === null || typeof obj !== "object") return false;
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-  const o = obj as Record<string, unknown>;
-  return typeof o["all"] === "function" && typeof o["run"] === "function";
+  if (typeof obj !== "object" || obj === null) return false;
+  return (
+    "all" in obj &&
+    "run" in obj &&
+    typeof (obj as Record<string, unknown>)["all"] === "function" &&
+    typeof (obj as Record<string, unknown>)["run"] === "function"
+  );
 }

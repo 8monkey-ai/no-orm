@@ -1,4 +1,4 @@
-import type { FieldName, Model, Where } from "../types";
+import type { Model, Where } from "../types";
 
 // --- Type Guards ---
 
@@ -10,16 +10,6 @@ export function isNonEmptyString(v: unknown): v is string {
   return typeof v === "string" && v !== "";
 }
 
-// --- SQL Helpers ---
-
-export function quote(name: string): string {
-  return `"${name.replaceAll('"', '""')}"`;
-}
-
-export function escapeLiteral(val: string): string {
-  return val.replaceAll("'", "''");
-}
-
 // --- Schema & Logic Helpers ---
 
 export function getPrimaryKeyFields(model: Model): string[] {
@@ -29,20 +19,18 @@ export function getPrimaryKeyFields(model: Model): string[] {
 /**
  * Extracts primary key values from a data object based on the model schema.
  */
-export function getIdentityValues<T extends Record<string, unknown>>(
+export function getIdentityValues(
   model: Model,
-  data: T,
-): Partial<T> {
+  data: Record<string, unknown>,
+): Record<string, unknown> {
   const pkFields = getPrimaryKeyFields(model);
-  const values: Partial<T> = {};
+  const values: Record<string, unknown> = {};
   for (let i = 0; i < pkFields.length; i++) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-    const field = pkFields[i]! as FieldName<T>;
-    const val = data[field];
-    if (val === undefined) {
+    const field = pkFields[i]!;
+    if (!(field in data)) {
       throw new Error(`Missing primary key field: ${field}`);
     }
-    values[field] = val;
+    values[field] = data[field];
   }
   return values;
 }
@@ -50,7 +38,6 @@ export function getIdentityValues<T extends Record<string, unknown>>(
 export function validateJsonPath(path: string[]): string[] {
   for (let i = 0; i < path.length; i++) {
     const segment = path[i]!;
-    // Faster validation without regex
     for (let j = 0; j < segment.length; j++) {
       const c = segment.codePointAt(j);
       if (c === undefined) {
@@ -69,46 +56,37 @@ export function validateJsonPath(path: string[]): string[] {
 
 /**
  * Builds a 'Where' filter targeting the primary key of a specific record.
+ * Returns Where<Record<string, unknown>> — callers cast to Where<T> at the boundary.
  */
-export function buildIdentityFilter<T extends Record<string, unknown>>(
+export function buildIdentityFilter(
   model: Model,
-  source: Partial<T>,
-): Where<T> {
+  source: Record<string, unknown>,
+): Where {
   const pkFields = getPrimaryKeyFields(model);
   if (pkFields.length === 0) {
     throw new Error("Model has no primary key defined.");
   }
   if (pkFields.length === 1) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-    const field = pkFields[0]! as FieldName<T>;
-    return {
-      field,
-      op: "eq" as const,
-      value: source[field],
-    };
+    const field = pkFields[0]!;
+    return { field, op: "eq" as const, value: source[field] };
   }
 
-  const clauses: Where<T>[] = [];
+  const clauses: Where[] = [];
   for (let i = 0; i < pkFields.length; i++) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-    const field = pkFields[i]! as FieldName<T>;
-    clauses.push({
-      field,
-      op: "eq" as const,
-      value: source[field],
-    });
+    const field = pkFields[i]!;
+    clauses.push({ field, op: "eq" as const, value: source[field] });
   }
-
   return { and: clauses };
 }
-export function assertNoPrimaryKeyUpdates<T extends Record<string, unknown>>(
+
+export function assertNoPrimaryKeyUpdates(
   model: Model,
-  data: Partial<T>,
+  data: Record<string, unknown>,
 ): void {
   const pkFields = getPrimaryKeyFields(model);
   for (let i = 0; i < pkFields.length; i++) {
     const field = pkFields[i]!;
-    if ((data as Record<string, unknown>)[field] !== undefined) {
+    if (data[field] !== undefined) {
       throw new Error("Primary key updates are not supported.");
     }
   }

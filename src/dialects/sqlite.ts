@@ -1,5 +1,4 @@
 import type { Database as BunDatabase } from "bun:sqlite";
-
 import type { Database as BetterSqlite3Database } from "better-sqlite3";
 import type { Database as SqliteDatabase } from "sqlite";
 
@@ -53,52 +52,51 @@ export const SqliteDialect: SqlDialect = {
   },
 };
 
-function isSyncSqlite(driver: unknown): driver is BunDatabase | BetterSqlite3Database {
-  if (typeof driver !== "object" || driver === null) return false;
-  const d = driver as unknown;
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-  const record = d as Record<string, unknown>;
-  return "prepare" in record && typeof record["prepare"] === "function";
+// better-sqlite3 and bun:sqlite are synchronous — they have `prepare` returning a statement
+// with synchronous `.all()`, `.get()`, `.run()` methods.
+// The async `sqlite` package wraps sqlite3 and has async `.all()`, `.get()`, `.run()` directly.
+function isSyncSqlite(driver: SqliteDriver): driver is BunDatabase | BetterSqlite3Database {
+  return "prepare" in driver && !("all" in driver);
 }
 
-type SqliteStmt = {
-  all: (this: void, ...params: unknown[]) => unknown[];
-  get: (this: void, ...params: unknown[]) => unknown;
-  run: (this: void, ...params: unknown[]) => { changes: number };
-};
+/**
+ * Sync SQLite executor for better-sqlite3 and bun:sqlite.
+ * Both drivers expose `.prepare(sql)` returning a statement with `.all()`, `.get()`, `.run()`.
+ * The type signatures differ between better-sqlite3 and bun:sqlite, so we use a
+ * structural interface for the subset we need.
+ */
+interface SyncDriver {
+  prepare(sql: string): {
+    all(...params: unknown[]): unknown[];
+    get(...params: unknown[]): unknown;
+    run(...params: unknown[]): { changes: number };
+  };
+}
 
-function createSyncSqliteExecutor(driver: BunDatabase | BetterSqlite3Database): QueryExecutor {
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-  const driverObj = driver as { prepare: (sql: string) => SqliteStmt };
+function createSyncSqliteExecutor(driver: SyncDriver): QueryExecutor {
   return {
     all: (sql, params) => {
-      const stmt = driverObj.prepare(sql);
-      const result = stmt.all(...(params ?? []));
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+      const result = driver.prepare(sql).all(...(params ?? []));
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- SQLite rows are plain objects
       return Promise.resolve(result as Record<string, unknown>[]);
     },
     get: (sql, params) => {
-      const stmt = driverObj.prepare(sql);
-      const result = stmt.get(...(params ?? []));
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+      const result = driver.prepare(sql).get(...(params ?? []));
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- SQLite row is a plain object or undefined
       return Promise.resolve(result as Record<string, unknown> | undefined);
     },
     run: (sql, params) => {
-      const stmt = driverObj.prepare(sql);
-      const res = stmt.run(...(params ?? []));
+      const res = driver.prepare(sql).run(...(params ?? []));
       return Promise.resolve({ changes: res.changes ?? 0 });
     },
     transaction: async (fn) => {
-      const begin = driverObj.prepare("BEGIN");
-      begin.run();
+      driver.prepare("BEGIN").run();
       try {
         const res = await fn(createSyncSqliteExecutor(driver));
-        const commit = driverObj.prepare("COMMIT");
-        commit.run();
+        driver.prepare("COMMIT").run();
         return res;
       } catch (e) {
-        const rollback = driverObj.prepare("ROLLBACK");
-        rollback.run();
+        driver.prepare("ROLLBACK").run();
         throw e;
       }
     },
@@ -114,7 +112,6 @@ function createAsyncSqliteExecutor(driver: SqliteDatabase): QueryExecutor {
       return { changes: res.changes ?? 0 };
     },
     transaction: async (fn) => {
-      // Nested transactions stay on the current connection and use savepoints.
       await driver.run("BEGIN");
       try {
         const res = await fn(createAsyncSqliteExecutor(driver));
@@ -129,6 +126,9 @@ function createAsyncSqliteExecutor(driver: SqliteDatabase): QueryExecutor {
 }
 
 export function createSqliteExecutor(driver: SqliteDriver): QueryExecutor {
-  if (isSyncSqlite(driver)) return createSyncSqliteExecutor(driver);
+  if (isSyncSqlite(driver)) {
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- BunDatabase and BetterSqlite3Database both satisfy SyncDriver structurally
+    return createSyncSqliteExecutor(driver as unknown as SyncDriver);
+  }
   return createAsyncSqliteExecutor(driver as SqliteDatabase);
 }

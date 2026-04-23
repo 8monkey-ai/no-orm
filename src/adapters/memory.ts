@@ -1,7 +1,4 @@
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
-// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-const LRUCache = require("lru-cache");
+import { LRUCache } from "lru-cache";
 
 import type { Adapter, Cursor, InferModel, Schema, Select, SortBy, Where } from "../types";
 import {
@@ -12,28 +9,16 @@ import {
 } from "./common";
 
 type RowData = Record<string, unknown>;
+type ModelCache = LRUCache<string, RowData>;
 
 const DEFAULT_MAX_SIZE = 1000;
-
-interface LRU {
-  has(key: string): boolean;
-  get(key: string): unknown;
-  set(key: string, value: unknown): void;
-  delete(key: string): void;
-  del(key: string): void;
-  forEach(cb: (value: unknown, key: string) => void): void;
-  entries?(): IterableIterator<[string, unknown]>;
-  keys?(): string[];
-  peek?(key: string): unknown;
-  size: number;
-}
 
 export interface MemoryAdapterOptions {
   maxSize?: number;
 }
 
 export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
-  private storage = new Map<keyof S, LRU>();
+  private storage = new Map<keyof S, ModelCache>();
 
   constructor(
     private schema: S,
@@ -43,12 +28,8 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
   migrate(): Promise<void> {
     const keys = Object.keys(this.schema) as (keyof S)[];
     for (const key of keys) {
-      const existing = this.storage.get(key);
-      if (existing === undefined) {
-        const max = this.options?.maxSize ?? DEFAULT_MAX_SIZE;
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion, @typescript-eslint/no-unsafe-member-access
-        const LRUClass = (LRUCache.default ?? LRUCache) as new (o: { max: number }) => LRU;
-        this.storage.set(key, new LRUClass({ max }));
+      if (!this.storage.has(key)) {
+        this.storage.set(key, new LRUCache({ max: this.options?.maxSize ?? DEFAULT_MAX_SIZE }));
       }
     }
     return Promise.resolve();
@@ -58,49 +39,39 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     return fn(this);
   }
 
-  async create<
+  create<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: { model: K; data: T; select?: Select<T> }): Promise<T> {
-    await Promise.resolve();
     const { model, data, select } = args;
-    const modelStorage = this.getModelStorage(model);
+    const cache = this.getModelStorage(model);
     const pkValue = this.getPrimaryKeyString(model, data);
 
-    if (modelStorage.has(pkValue)) {
+    if (cache.has(pkValue)) {
       throw new Error(`Record with primary key ${pkValue} already exists in ${model}`);
     }
 
     const record: RowData = { ...data };
-    modelStorage.set(pkValue, record);
-
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-    return this.applySelect(record as T, select);
+    cache.set(pkValue, record);
+    return Promise.resolve(this.applySelect<T>(record, select));
   }
 
-  async find<
+  find<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: { model: K; where: Where<T>; select?: Select<T> }): Promise<T | null> {
-    await Promise.resolve();
     const { model, where, select } = args;
-    const modelStorage = this.getModelStorage(model);
+    const cache = this.getModelStorage(model);
 
-    for (const [, value] of this.getEntries(modelStorage)) {
-      if (
-        isRecord(value) &&
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-        (where === undefined || this.evaluateWhere(where as unknown as Where, value))
-      ) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-        return this.applySelect(value as T, select);
+    for (const [, value] of cache.entries()) {
+      if (this.matchesWhere(where, value)) {
+        return Promise.resolve(this.applySelect<T>(value, select));
       }
     }
-
-    return null;
+    return Promise.resolve(null);
   }
 
-  async findMany<
+  findMany<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: {
@@ -112,156 +83,76 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     offset?: number;
     cursor?: Cursor<T>;
   }): Promise<T[]> {
-    await Promise.resolve();
     const { model, where, select, sortBy, limit, offset, cursor } = args;
-    const modelStorage = this.getModelStorage(model);
+    const cache = this.getModelStorage(model);
 
-    const results: T[] = [];
-    for (const [, value] of this.getEntries(modelStorage)) {
-      if (
-        isRecord(value) &&
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-        (where === undefined || this.evaluateWhere(where as unknown as Where, value))
-      ) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-        results.push(value as T);
+    let results: RowData[] = [];
+    for (const [, value] of cache.entries()) {
+      if (this.matchesWhere(where, value)) {
+        results.push(value);
       }
     }
 
-    let processedResults = [...results];
-
     if (cursor !== undefined) {
-      const cursorValues = cursor.after as Record<string, unknown>;
-      const criteria: { field: string; direction: "asc" | "desc"; path?: string[] }[] = [];
-      if (sortBy !== undefined && sortBy.length > 0) {
-        for (let i = 0; i < sortBy.length; i++) {
-          const s = sortBy[i]!;
-          if (cursorValues[s.field] !== undefined) {
-            criteria.push({ field: s.field, direction: s.direction ?? "asc", path: s.path });
-          }
-        }
-      } else {
-        const keys = Object.keys(cursorValues);
-        for (let i = 0; i < keys.length; i++) {
-          const k = keys[i]!;
-          criteria.push({ field: k, direction: "asc", path: undefined });
-        }
-      }
-
-      if (criteria.length > 0) {
-        const filtered: T[] = [];
-        for (let i = 0; i < processedResults.length; i++) {
-          const record = processedResults[i]!;
-          let match = false;
-          for (let j = 0; j < criteria.length; j++) {
-            const curr = criteria[j]!;
-            // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-            const recordVal = this.getValue(record as unknown as RowData, curr.field, curr.path);
-            const cursorVal = cursorValues[curr.field];
-            const comp = this.compareValues(recordVal, cursorVal);
-
-            if (comp === 0) continue;
-            if (curr.direction === "desc" ? comp < 0 : comp > 0) {
-              match = true;
-            }
-            break;
-          }
-          if (match) filtered.push(record);
-        }
-        processedResults = filtered;
-      }
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- SortBy<T>.field is a subtype of string, safe for internal use
+      results = this.applyCursor(results, cursor, sortBy as SortBy[] | undefined);
     }
 
     if (sortBy !== undefined && sortBy.length > 0) {
-      processedResults.sort((a, b) => {
-        for (let i = 0; i < sortBy.length; i++) {
-          const s = sortBy[i]!;
-          const field = s.field;
-          const direction = s.direction;
-          const path = s.path;
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-          const valA = this.getValue(a as unknown as RowData, field, path);
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-          const valB = this.getValue(b as unknown as RowData, field, path);
-          if (valA === valB) continue;
-          const comparison = this.compareValues(valA, valB);
-          if (comparison === 0) continue;
-          return direction === "desc" ? -comparison : comparison;
-        }
-        return 0;
-      });
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- same as above
+      results = this.applySort(results, sortBy as SortBy[]);
     }
 
     const start = offset ?? 0;
-    const end = limit === undefined ? processedResults.length : start + limit;
-    const paginatedResults: T[] = [];
-    for (let i = start; i < end && i < processedResults.length; i++) {
-      paginatedResults.push(this.applySelect(processedResults[i]!, select));
+    const end = limit === undefined ? results.length : start + limit;
+    const out: T[] = [];
+    for (let i = start; i < end && i < results.length; i++) {
+      out.push(this.applySelect<T>(results[i]!, select));
     }
-
-    return paginatedResults;
+    return Promise.resolve(out);
   }
 
-  async update<
+  update<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: { model: K; where: Where<T>; data: Partial<T> }): Promise<T | null> {
-    await Promise.resolve();
     const { model, where, data } = args;
-    const modelSpec = this.getModel(model);
-    assertNoPrimaryKeyUpdates(modelSpec, data);
-    const modelStorage = this.getModelStorage(model);
+    assertNoPrimaryKeyUpdates(this.getModel(model), data);
+    const cache = this.getModelStorage(model);
 
-    for (const [key, value] of this.getEntries(modelStorage)) {
-      if (
-        isRecord(value) &&
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-        this.evaluateWhere(where as unknown as Where, value)
-      ) {
-        const updated: RowData = { ...(value as object), ...(data as object) };
-        modelStorage.set(key, updated);
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-        return this.applySelect(updated as T);
+    for (const [key, value] of cache.entries()) {
+      if (this.matchesWhere(where, value)) {
+        const updated: RowData = { ...value, ...data };
+        cache.set(key, updated);
+        return Promise.resolve(this.applySelect<T>(updated));
       }
     }
-
-    return null;
+    return Promise.resolve(null);
   }
 
-  async updateMany<
+  updateMany<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: { model: K; where?: Where<T>; data: Partial<T> }): Promise<number> {
-    await Promise.resolve();
     const { model, where, data } = args;
-    const modelSpec = this.getModel(model);
-    assertNoPrimaryKeyUpdates(modelSpec, data);
-    const modelStorage = this.getModelStorage(model);
+    assertNoPrimaryKeyUpdates(this.getModel(model), data);
+    const cache = this.getModelStorage(model);
 
-    const updates: { key: string; record: T }[] = [];
-    for (const [key, value] of this.getEntries(modelStorage)) {
-      if (
-        isRecord(value) &&
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-        (where === undefined || this.evaluateWhere(where as unknown as Where, value))
-      ) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-        updates.push({ key, record: value as T });
+    // Collect first, then mutate — avoids mutation during iteration
+    const matches: { key: string; value: RowData }[] = [];
+    for (const [key, value] of cache.entries()) {
+      if (this.matchesWhere(where, value)) {
+        matches.push({ key, value });
       }
     }
-
-    for (let i = 0; i < updates.length; i++) {
-      const item = updates[i]!;
-      const key = item.key;
-      const record = item.record;
-      const updated: RowData = { ...(record as object), ...(data as object) };
-      modelStorage.set(key, updated);
+    for (let i = 0; i < matches.length; i++) {
+      const m = matches[i]!;
+      cache.set(m.key, { ...m.value, ...data });
     }
-
-    return updates.length;
+    return Promise.resolve(matches.length);
   }
 
-  async upsert<
+  upsert<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: {
@@ -271,136 +162,89 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     where?: Where<T>;
     select?: Select<T>;
   }): Promise<T> {
-    await Promise.resolve();
     const { model, create, update, where, select } = args;
     const modelSpec = this.getModel(model);
     assertNoPrimaryKeyUpdates(modelSpec, update);
 
     const pkValue = this.getPrimaryKeyString(model, create);
-    const modelStorage = this.getModelStorage(model);
-    const existing = modelStorage.get(pkValue);
+    const cache = this.getModelStorage(model);
+    const existing = cache.get(pkValue);
 
-    if (existing !== undefined && isRecord(existing)) {
-      if (
-        where === undefined ||
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-        this.evaluateWhere(where as unknown as Where, existing)
-      ) {
-        const updated: RowData = { ...(existing as object), ...(update as object) };
-        modelStorage.set(pkValue, updated);
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-        return this.applySelect(updated as T, select);
+    if (existing !== undefined) {
+      if (this.matchesWhere(where, existing)) {
+        const updated: RowData = { ...existing, ...update };
+        cache.set(pkValue, updated);
+        return Promise.resolve(this.applySelect<T>(updated, select));
       }
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-      return this.applySelect(existing as T, select);
+      return Promise.resolve(this.applySelect<T>(existing, select));
     }
 
     return this.create({ model, data: create, select });
   }
 
-  async delete<
+  delete<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: { model: K; where: Where<T> }): Promise<void> {
-    await Promise.resolve();
     const { model, where } = args;
-    const modelStorage = this.getModelStorage(model);
+    const cache = this.getModelStorage(model);
 
-    for (const [key, value] of this.getEntries(modelStorage)) {
-      if (
-        isRecord(value) &&
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-        this.evaluateWhere(where as unknown as Where, value)
-      ) {
-        this.lruDelete(modelStorage, key);
-        return;
+    for (const [key, value] of cache.entries()) {
+      if (this.matchesWhere(where, value)) {
+        cache.delete(key);
+        return Promise.resolve();
       }
     }
+    return Promise.resolve();
   }
 
-  async deleteMany<
+  deleteMany<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: { model: K; where?: Where<T> }): Promise<number> {
-    await Promise.resolve();
     const { model, where } = args;
-    const modelStorage = this.getModelStorage(model);
+    const cache = this.getModelStorage(model);
     const toDelete: string[] = [];
 
-    for (const [key, value] of this.getEntries(modelStorage)) {
-      if (
-        isRecord(value) &&
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-        (where === undefined || this.evaluateWhere(where as unknown as Where, value))
-      ) {
+    for (const [key, value] of cache.entries()) {
+      if (this.matchesWhere(where, value)) {
         toDelete.push(key);
       }
     }
-
     for (let i = 0; i < toDelete.length; i++) {
-      this.lruDelete(modelStorage, toDelete[i]!);
+      cache.delete(toDelete[i]!);
     }
-
-    return toDelete.length;
+    return Promise.resolve(toDelete.length);
   }
 
-  async count<
+  count<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: { model: K; where?: Where<T> }): Promise<number> {
-    await Promise.resolve();
     const { model, where } = args;
-    const modelStorage = this.getModelStorage(model);
+    const cache = this.getModelStorage(model);
 
-    if (where === undefined) return modelStorage.size;
+    if (where === undefined) return Promise.resolve(cache.size);
 
     let count = 0;
-    for (const [, value] of this.getEntries(modelStorage)) {
-      if (
-        isRecord(value) &&
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-        this.evaluateWhere(where as unknown as Where, value)
-      ) {
-        count++;
-      }
+    for (const [, value] of cache.entries()) {
+      if (this.matchesWhere(where, value)) count++;
     }
-    return count;
+    return Promise.resolve(count);
   }
 
-  private lruDelete(lru: LRU, key: string): void {
-    if (typeof lru.delete === "function") {
-      lru.delete(key);
-    } else if (typeof lru.del === "function") {
-      lru.del(key);
-    }
-  }
+  // --- Private helpers ---
 
-  private *getEntries(lru: LRU): IterableIterator<[string, unknown]> {
-    if (typeof lru.entries === "function") {
-      yield* lru.entries();
-    } else if (typeof lru.keys === "function") {
-      const keys = lru.keys();
-      for (let i = 0; i < keys.length; i++) {
-        const k = keys[i]!;
-        const v = typeof lru.peek === "function" ? lru.peek(k) : lru.get(k);
-        yield [k, v];
-      }
-    } else {
-      const entries: [string, unknown][] = [];
-      lru.forEach((v, k) => entries.push([k, v]));
-      yield* entries;
-    }
-  }
-
-  private getModelStorage<K extends keyof S & string>(model: K): LRU {
+  private getModelStorage(model: string): ModelCache {
     const storage = this.storage.get(model);
-    if (storage === undefined)
+    if (storage === undefined) {
       throw new Error(`Model ${model} not initialized. Call migrate() first.`);
+    }
     return storage;
   }
 
-  private getModel<K extends keyof S & string>(model: K): S[K] {
-    const spec = this.schema[model];
+  private getModel(model: string): S[keyof S & string] {
+    const spec = this.schema[model as keyof S & string];
     if (spec === undefined) throw new Error(`Model ${model} not found in schema`);
     return spec;
   }
@@ -412,13 +256,11 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     let res = "";
     for (let i = 0; i < pkFields.length; i++) {
       if (i > 0) res += "|";
-      const pkField = pkFields[i]!;
-      const val = pkValues[pkField];
+      const val = pkValues[pkFields[i]!];
       if (val !== null && val !== undefined) {
         if (typeof val === "object") {
           res += JSON.stringify(val);
-        } else {
-          // eslint-disable-next-line @typescript-eslint/no-base-to-string
+        } else if (typeof val === "string" || typeof val === "number" || typeof val === "boolean") {
           res += String(val);
         }
       }
@@ -426,88 +268,156 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     return res;
   }
 
-  private applySelect<T extends RowData>(record: T, select?: Select<T>): T {
-    if (select === undefined) {
-      return { ...record };
+  /**
+   * Checks if a record matches a Where filter.
+   * Accepts Where<T> for any T — since RowData is Record<string, unknown>,
+   * all field names are valid string keys. This avoids repeated generic casts.
+   */
+  private matchesWhere(where: Where | undefined, record: RowData): boolean {
+    if (where === undefined) return true;
+    return this.evaluateWhere(where, record);
+  }
+
+  private evaluateWhere(where: Where, record: RowData): boolean {
+    if ("and" in where) {
+      for (let i = 0; i < where.and.length; i++) {
+        if (!this.evaluateWhere(where.and[i]!, record)) return false;
+      }
+      return true;
     }
+    if ("or" in where) {
+      for (let i = 0; i < where.or.length; i++) {
+        if (this.evaluateWhere(where.or[i]!, record)) return true;
+      }
+      return false;
+    }
+
+    const recordVal = this.getValue(record, where.field, where.path);
+
+    switch (where.op) {
+      case "eq":
+        return recordVal === where.value;
+      case "ne":
+        return recordVal !== where.value;
+      case "gt":
+        return this.compareValues(recordVal, where.value) > 0;
+      case "gte":
+        return this.compareValues(recordVal, where.value) >= 0;
+      case "lt":
+        return this.compareValues(recordVal, where.value) < 0;
+      case "lte":
+        return this.compareValues(recordVal, where.value) <= 0;
+      case "in":
+        return Array.isArray(where.value) && where.value.includes(recordVal);
+      case "not_in":
+        return Array.isArray(where.value) && !where.value.includes(recordVal);
+    }
+    return false;
+  }
+
+  /**
+   * Projects a record to the selected fields, returning a shallow copy.
+   * The `as T` casts are intentional: storage holds RowData but the adapter
+   * interface promises T. This is the single boundary where the cast occurs.
+   */
+  private applySelect<T extends Record<string, unknown>>(
+    record: RowData,
+    select?: Select<T>,
+  ): T {
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- RowData -> T at adapter boundary
+    if (select === undefined) return { ...record } as T;
     const res: RowData = {};
     for (let i = 0; i < select.length; i++) {
       const k = select[i]!;
       res[k] = record[k] ?? null;
     }
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- RowData -> T at adapter boundary
     return res as T;
   }
 
   private getValue(record: RowData, field: string, path?: string[]): unknown {
-    let val = record[field];
+    let val: unknown = record[field];
     if (path !== undefined && path.length > 0) {
       for (let i = 0; i < path.length; i++) {
         if (!isRecord(val)) return undefined;
-        const subKey = path[i]!;
-        val = val[subKey];
+        val = val[path[i]!];
       }
     }
     return val;
   }
 
-  private evaluateWhere(where: Where, record: RowData): boolean {
-    if ("and" in where) {
-      const and = where.and;
-      for (let i = 0; i < and.length; i++) {
-        if (!this.evaluateWhere(and[i]!, record)) return false;
+  private applyCursor(
+    results: RowData[],
+    cursor: Cursor,
+    sortBy?: SortBy[],
+  ): RowData[] {
+    const cursorValues = cursor.after as Record<string, unknown>;
+    const criteria: { field: string; direction: "asc" | "desc"; path?: string[] }[] = [];
+
+    if (sortBy !== undefined && sortBy.length > 0) {
+      for (let i = 0; i < sortBy.length; i++) {
+        const s = sortBy[i]!;
+        if (cursorValues[s.field] !== undefined) {
+          criteria.push({ field: s.field, direction: s.direction ?? "asc", path: s.path });
+        }
       }
-      return true;
-    }
-    if ("or" in where) {
-      const or = where.or;
-      for (let i = 0; i < or.length; i++) {
-        if (this.evaluateWhere(or[i]!, record)) return true;
+    } else {
+      const keys = Object.keys(cursorValues);
+      for (let i = 0; i < keys.length; i++) {
+        criteria.push({ field: keys[i]!, direction: "asc" });
       }
-      return false;
     }
 
-    const field = where.field;
-    const op = where.op;
-    const value = where.value;
-    const path = where.path;
-    const recordVal = this.getValue(record, field, path);
+    if (criteria.length === 0) return results;
 
-    switch (op) {
-      case "eq":
-        return recordVal === value;
-      case "ne":
-        return recordVal !== value;
-      case "gt":
-        return this.compareValues(recordVal, value) > 0;
-      case "gte":
-        return this.compareValues(recordVal, value) >= 0;
-      case "lt":
-        return this.compareValues(recordVal, value) < 0;
-      case "lte":
-        return this.compareValues(recordVal, value) <= 0;
-      case "in":
-        return Array.isArray(value) && value.includes(recordVal);
-      case "not_in":
-        return Array.isArray(value) && !value.includes(recordVal);
+    const filtered: RowData[] = [];
+    for (let i = 0; i < results.length; i++) {
+      const record = results[i]!;
+      let match = false;
+      // Lexicographic keyset pagination:
+      // (a > ?) OR (a = ? AND b > ?) OR (a = ? AND b = ? AND c > ?)
+      for (let j = 0; j < criteria.length; j++) {
+        const curr = criteria[j]!;
+        const recordVal = this.getValue(record, curr.field, curr.path);
+        const cursorVal = cursorValues[curr.field];
+        const comp = this.compareValues(recordVal, cursorVal);
+
+        if (comp === 0) continue;
+        if (curr.direction === "desc" ? comp < 0 : comp > 0) {
+          match = true;
+        }
+        break;
+      }
+      if (match) filtered.push(record);
     }
-    return false;
+    return filtered;
+  }
+
+  private applySort(results: RowData[], sortBy: SortBy[]): RowData[] {
+    return results.toSorted((a, b) => {
+      for (let i = 0; i < sortBy.length; i++) {
+        const s = sortBy[i]!;
+        const valA = this.getValue(a, s.field, s.path);
+        const valB = this.getValue(b, s.field, s.path);
+        if (valA === valB) continue;
+        const comparison = this.compareValues(valA, valB);
+        if (comparison === 0) continue;
+        return s.direction === "desc" ? -comparison : comparison;
+      }
+      return 0;
+    });
   }
 
   private compareValues(left: unknown, right: unknown): number {
     if (left === right) return 0;
-    if (left === undefined) return -1;
-    if (right === undefined) return 1;
-    if (left === null) return -1;
-    if (right === null) return 1;
+    if (left === undefined || left === null) return -1;
+    if (right === undefined || right === null) return 1;
     if (typeof left !== typeof right) return 0;
     if (typeof left === "string" && typeof right === "string") {
-      if (left < right) return -1;
-      if (left > right) return 1;
+      return left < right ? -1 : left > right ? 1 : 0;
     }
     if (typeof left === "number" && typeof right === "number") {
-      if (left < right) return -1;
-      if (left > right) return 1;
+      return left < right ? -1 : left > right ? 1 : 0;
     }
     return 0;
   }
