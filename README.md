@@ -14,6 +14,8 @@ It is not a query builder, migration framework, or full ORM runtime.
 ## Installation
 
 ```bash
+npm install @8monkey/no-orm
+# or
 bun add @8monkey/no-orm
 ```
 
@@ -57,7 +59,7 @@ await adapter.migrate();
 
 ### Postgres
 
-Supports `pg`, `postgres.js`, and Bun SQL.
+Supports `pg`, `postgres.js`, and `Bun.SQL`.
 
 ```ts
 import postgres from "postgres"; // or import { Pool } from "pg"
@@ -70,6 +72,8 @@ await adapter.migrate();
 ```
 
 ### Memory
+
+Uses [lru-cache](https://github.com/isaacs/node-lru-cache) for bounded storage with LRU eviction.
 
 ```ts
 import { MemoryAdapter } from "@8monkey/no-orm/adapters/memory";
@@ -109,17 +113,30 @@ const users = await adapter.findMany<"users", User>({
   limit: 20,
 });
 
-// Update
+// Update one
 const updated = await adapter.update<"users", User>({
   model: "users",
   where: { field: "id", op: "eq", value: "u1" },
   data: { age: 31 },
 });
 
-// Delete
+// Update many
+const updatedCount = await adapter.updateMany<"users", User>({
+  model: "users",
+  where: { field: "is_active", op: "eq", value: true },
+  data: { age: 99 },
+});
+
+// Delete one
 await adapter.delete<"users", User>({
   model: "users",
   where: { field: "id", op: "eq", value: "u1" },
+});
+
+// Delete many
+const deletedCount = await adapter.deleteMany<"users", User>({
+  model: "users",
+  where: { field: "is_active", op: "eq", value: false },
 });
 
 // Count
@@ -222,10 +239,11 @@ SQLite and Postgres support nested transactions via savepoints.
 ## Notes
 
 - `upsert` always conflicts on the Primary Key
-- Optional `where` in `upsert` acts as a predicate — record is only updated if condition is met
+- Optional `where` in `upsert` acts as a predicate -- record is only updated if condition is met
 - Primary-key updates are rejected to keep adapter behavior consistent
 - SQLite stores JSON as text; Postgres stores JSON as `jsonb`
 - `number` and `timestamp` use standard JavaScript `Number`. `bigint` is not supported in v1.
+- Memory adapter uses `lru-cache` (required dependency) with configurable `maxSize` for bounded storage
 
 ## License
 

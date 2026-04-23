@@ -51,7 +51,7 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
       throw new Error(`Record with primary key ${pkValue} already exists in ${model}`);
     }
 
-    const record: RowData = { ...data };
+    const record: RowData = Object.assign({}, data);
     cache.set(pkValue, record);
     return Promise.resolve(this.applySelect<T>(record, select));
   }
@@ -122,7 +122,7 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
 
     for (const [key, value] of cache.entries()) {
       if (this.matchesWhere(where, value)) {
-        const updated: RowData = { ...value, ...data };
+        const updated: RowData = Object.assign({}, value, data);
         cache.set(key, updated);
         return Promise.resolve(this.applySelect<T>(updated));
       }
@@ -147,7 +147,7 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     }
     for (let i = 0; i < matches.length; i++) {
       const m = matches[i]!;
-      cache.set(m.key, { ...m.value, ...data });
+      cache.set(m.key, Object.assign({}, m.value, data));
     }
     return Promise.resolve(matches.length);
   }
@@ -172,7 +172,7 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
 
     if (existing !== undefined) {
       if (this.matchesWhere(where, existing)) {
-        const updated: RowData = { ...existing, ...update };
+        const updated: RowData = Object.assign({}, existing, update);
         cache.set(pkValue, updated);
         return Promise.resolve(this.applySelect<T>(updated, select));
       }
@@ -325,7 +325,7 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     select?: Select<T>,
   ): T {
     // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- RowData -> T at adapter boundary
-    if (select === undefined) return { ...record } as T;
+    if (select === undefined) return Object.assign({}, record) as T;
     const res: RowData = {};
     for (let i = 0; i < select.length; i++) {
       const k = select[i]!;

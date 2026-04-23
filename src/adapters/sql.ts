@@ -1,4 +1,3 @@
-import type { QueryExecutor, SqlDialect } from "../dialects/types";
 import type { Adapter, Cursor, Field, InferModel, Schema, Select, SortBy, Where } from "../types";
 import {
   assertNoPrimaryKeyUpdates,
@@ -7,6 +6,50 @@ import {
   getPrimaryKeyFields,
   mapNumeric,
 } from "./common";
+
+// --- Shared contracts for SQL dialects and executors ---
+
+export interface QueryExecutor {
+  all(sql: string, params?: unknown[]): Promise<Record<string, unknown>[]>;
+  get(sql: string, params?: unknown[]): Promise<Record<string, unknown> | undefined>;
+  run(sql: string, params?: unknown[]): Promise<{ changes: number }>;
+  transaction<T>(fn: (executor: QueryExecutor) => Promise<T>): Promise<T>;
+}
+
+export interface SqlDialect {
+  placeholder(index: number): string;
+  quote(identifier: string): string;
+  escapeLiteral(value: string): string;
+  mapFieldType(field: Field): string;
+  buildJsonPath(path: string[]): string;
+  buildJsonExtract(
+    fieldName: string,
+    path: (string | number)[],
+    isNumeric?: boolean,
+    isBoolean?: boolean,
+  ): string;
+  upsert?(options: {
+    table: string;
+    insertColumns: string[];
+    insertPlaceholders: string[];
+    updateColumns: string[];
+    conflictColumns: string[];
+    select?: readonly string[];
+    whereSql?: string;
+  }): { sql: string; params?: unknown[] };
+}
+
+export function isQueryExecutor(obj: unknown): obj is QueryExecutor {
+  if (typeof obj !== "object" || obj === null) return false;
+  return (
+    "all" in obj &&
+    "run" in obj &&
+    typeof (obj as Record<string, unknown>)["all"] === "function" &&
+    typeof (obj as Record<string, unknown>)["run"] === "function"
+  );
+}
+
+// --- Abstract SQL adapter ---
 
 export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S> {
   constructor(
@@ -135,7 +178,8 @@ export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S
     const params: unknown[] = [];
     let sql = `SELECT ${this.buildSelect(select)} FROM ${this.dialect.quote(model)}`;
 
-    const builtWhere = this.buildWhere(model, where, cursor, sortBy, params.length);
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- SortBy<T>.field is a subtype of string
+    const builtWhere = this.buildWhere(model, where, cursor, sortBy as SortBy[] | undefined);
     if (builtWhere.sql !== "1=1") {
       sql += ` WHERE ${builtWhere.sql}`;
       for (let i = 0; i < builtWhere.params.length; i++) {
@@ -148,7 +192,7 @@ export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S
       for (let i = 0; i < sortBy.length; i++) {
         const sort = sortBy[i]!;
         sortParts.push(
-          `${this.buildColumnExpr(model, sort.field as string, sort.path)} ${(sort.direction ?? "asc").toUpperCase()}`,
+          `${this.buildColumnExpr(model, sort.field, sort.path)} ${(sort.direction ?? "asc").toUpperCase()}`,
         );
       }
       sql += ` ORDER BY ${sortParts.join(", ")}`;
@@ -390,7 +434,7 @@ export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S
     return spec;
   }
 
-  protected buildSelect(select?: Select<any>): string {
+  protected buildSelect(select?: Select<Record<string, unknown>>): string {
     if (!select) return "*";
     const parts = [];
     for (let i = 0; i < select.length; i++) {
@@ -420,9 +464,9 @@ export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S
 
   protected buildWhere(
     model: string,
-    where?: Where<any>,
-    cursor?: Cursor<any>,
-    sortBy?: SortBy<any>[],
+    where?: Where,
+    cursor?: Cursor,
+    sortBy?: SortBy[],
     startIndex = 0,
   ): { sql: string; params: unknown[] } {
     const parts: string[] = [];
@@ -453,7 +497,7 @@ export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S
 
   private buildWhereRecursive(
     model: string,
-    where: Where<any>,
+    where: Where,
     startIndex: number,
   ): { sql: string; params: unknown[] } {
     if ("and" in where) {
@@ -526,8 +570,8 @@ export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S
 
   private buildCursor(
     model: string,
-    cursor: Cursor<any>,
-    sortBy?: SortBy<any>[],
+    cursor: Cursor,
+    sortBy?: SortBy[],
     startIndex = 0,
   ): { sql: string; params: unknown[] } {
     const cursorValues = cursor.after as Record<string, unknown>;
@@ -615,7 +659,7 @@ export abstract class SqlAdapter<S extends Schema = Schema> implements Adapter<S
   protected mapRow<T extends Record<string, unknown> = Record<string, unknown>>(
     modelName: string,
     row: Record<string, unknown>,
-    select?: Select<any>,
+    select?: Select<Record<string, unknown>>,
   ): T {
     const fields = this.getModel(modelName).fields;
     const res: Record<string, unknown> = {};
