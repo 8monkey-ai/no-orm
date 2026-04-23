@@ -15,7 +15,9 @@
     "max-classes-per-file": "off",
     "max-lines": "off",
     "max-dependencies": "off",
-    "no-inline-comments": "off"
+    "no-inline-comments": "off",
+    "max-depth": "off",
+    "no-unused-vars": "error"
   },
   "ignorePatterns": ["dist/**", "node_modules/**", "e2e/**"]
 }

@@ -203,8 +203,7 @@ function createPgExecutor(driver: PgClient | PgPool | PgPoolClient): QueryExecut
     get: async (sql, params) => {
       const query = getNamedQuery(sql);
       const res = await driver.query({ ...query, values: params });
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-      const rows = getPgQueryResultRows(res) as Record<string, unknown>[];
+      const rows = getPgQueryResultRows<Array<Record<string, unknown>>>(res);
       return rows[0];
     },
     run: async (sql, params) => {

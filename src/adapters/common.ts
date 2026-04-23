@@ -36,13 +36,12 @@ export function getIdentityValues<T extends Record<string, unknown>>(
   const pkFields = getPrimaryKeyFields(model);
   const values: Partial<T> = {};
   for (let i = 0; i < pkFields.length; i++) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
-    const field = pkFields[i]! as FieldName<T>;
-    const val = data[field];
-    if (val === undefined) {
+    const field = pkFields[i]!;
+    if (!(field in data)) {
       throw new Error(`Missing primary key field: ${field}`);
     }
-    values[field] = val;
+    const val = data[field as keyof T];
+    values[field as keyof T] = val;
   }
   return values;
 }
@@ -84,7 +83,8 @@ export function buildIdentityFilter<T extends Record<string, unknown>>(
     return {
       field,
       op: "eq" as const,
-      value: source[field],
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+      value: (source as Record<FieldName<T>, unknown>)[field],
     };
   }
 
@@ -95,7 +95,8 @@ export function buildIdentityFilter<T extends Record<string, unknown>>(
     clauses.push({
       field,
       op: "eq" as const,
-      value: source[field],
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+      value: (source as Record<FieldName<T>, unknown>)[field],
     });
   }
 
