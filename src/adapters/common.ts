@@ -1,4 +1,4 @@
-import type { Model, Where } from "../types";
+import type { Cursor, Model, SortBy, Where } from "../types";
 
 // --- Schema & Logic Helpers ---
 
@@ -59,4 +59,50 @@ export function assertNoPrimaryKeyUpdates(model: Model, data: Record<string, unk
  */
 export function mapNumeric(value: unknown): number | null {
   return value === null || value === undefined ? null : Number(value);
+}
+
+// --- Value & Comparison Helpers ---
+
+/**
+ * Extracts a value from a record, supporting nested JSON paths.
+ */
+export function getNestedValue(
+  record: Record<string, unknown>,
+  field: string,
+  path?: string[],
+): unknown {
+  let val: unknown = record[field];
+  if (path !== undefined && path.length > 0) {
+    for (let i = 0; i < path.length; i++) {
+      if (typeof val !== "object" || val === null || Array.isArray(val)) return undefined;
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- narrowed by object check above
+      val = (val as Record<string, unknown>)[path[i]!];
+    }
+  }
+  return val;
+}
+
+/**
+ * Normalizes pagination criteria from a cursor and optional sort parameters.
+ */
+export function getPaginationCriteria(
+  cursor: Cursor,
+  sortBy?: SortBy[],
+): { field: string; direction: "asc" | "desc"; path?: string[] }[] {
+  const cursorValues = cursor.after as Record<string, unknown>;
+  const criteria = [];
+  if (sortBy !== undefined && sortBy.length > 0) {
+    for (let i = 0; i < sortBy.length; i++) {
+      const s = sortBy[i]!;
+      if (cursorValues[s.field] !== undefined) {
+        criteria.push({ field: s.field, direction: s.direction ?? "asc", path: s.path });
+      }
+    }
+  } else {
+    const keys = Object.keys(cursorValues);
+    for (let i = 0; i < keys.length; i++) {
+      criteria.push({ field: keys[i]!, direction: "asc" as const, path: undefined });
+    }
+  }
+  return criteria;
 }

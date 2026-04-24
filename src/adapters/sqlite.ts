@@ -3,17 +3,31 @@ import type { Database as BunDatabase } from "bun:sqlite";
 import type { Database as BetterSqlite3Database } from "better-sqlite3";
 import type { Database as SqliteDatabase } from "sqlite";
 
-import type { Adapter, Field, Schema } from "../types";
-import { type QueryExecutor, type SqlDialect, SqlAdapter, isQueryExecutor } from "./sql";
+import type { Adapter, Field, InferModel, Schema, Select, SortBy, Where, Cursor } from "../types";
+import {
+  type QueryExecutor,
+  type SqlFormat,
+  isQueryExecutor,
+  migrate,
+  create,
+  find,
+  findMany,
+  update,
+  updateMany,
+  upsert,
+  remove,
+  removeMany,
+  count,
+} from "./sql";
 
 export type SqliteDriver = SqliteDatabase | BunDatabase | BetterSqlite3Database;
 
-// --- Dialect ---
+// --- Formatting Hooks ---
 
-export const SqliteDialect: SqlDialect = {
+const sqlite: SqlFormat = {
   placeholder: () => "?",
   quote: (s) => `"${s.replaceAll('"', '""')}"`,
-  escapeLiteral: (s) => s.replaceAll("'", "''"),
+  mapBoolean: (v) => (v ? 1 : 0),
   mapFieldType(field: Field): string {
     switch (field.type) {
       case "string":
@@ -30,8 +44,8 @@ export const SqliteDialect: SqlDialect = {
         return "TEXT";
     }
   },
-  buildJsonPath(path: string[]): string {
-    let res = "$";
+  jsonExtract(column: string, path: string[]): string {
+    let jsonPath = "$";
     for (let i = 0; i < path.length; i++) {
       const segment = path[i]!;
       let isIndex = true;
@@ -43,15 +57,12 @@ export const SqliteDialect: SqlDialect = {
         }
       }
       if (isIndex) {
-        res += `[${segment}]`;
+        jsonPath += `[${segment}]`;
       } else {
-        res += `.${segment}`;
+        jsonPath += `.${segment}`;
       }
     }
-    return res;
-  },
-  buildJsonExtract(column: string, path: string[]): string {
-    return `json_extract(${column}, '${this.buildJsonPath(path)}')`;
+    return `json_extract(${column}, '${jsonPath}')`;
   },
 };
 
@@ -159,14 +170,97 @@ function createSqliteExecutor(driver: SqliteDriver): QueryExecutor {
 
 // --- Adapter ---
 
-export class SqliteAdapter<S extends Schema = Schema> extends SqlAdapter<S> implements Adapter<S> {
-  constructor(schema: S, driver: SqliteDriver | QueryExecutor) {
-    super(schema, isQueryExecutor(driver) ? driver : createSqliteExecutor(driver), SqliteDialect);
+export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
+  private executor: QueryExecutor;
+
+  constructor(
+    private schema: S,
+    driver: SqliteDriver | QueryExecutor,
+  ) {
+    this.executor = isQueryExecutor(driver) ? driver : createSqliteExecutor(driver);
   }
 
+  migrate = () => migrate(this.executor, this.schema, sqlite);
+
   transaction<T>(fn: (tx: Adapter<S>) => Promise<T>): Promise<T> {
-    return this.executor.transaction((innerExecutor) => {
-      return fn(new SqliteAdapter(this.schema, innerExecutor));
-    });
+    return this.executor.transaction((exec) => fn(new SqliteAdapter(this.schema, exec)));
   }
+
+  create = <
+    K extends keyof S & string,
+    T extends Record<string, unknown> = InferModel<S[K]>,
+  >(args: {
+    model: K;
+    data: T;
+    select?: Select<T>;
+  }) => create(this.executor, args.model, this.schema[args.model]!, sqlite, args);
+
+  find = <K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
+    model: K;
+    where: Where<T>;
+    select?: Select<T>;
+  }) => find(this.executor, args.model, this.schema[args.model]!, sqlite, args);
+
+  findMany = <
+    K extends keyof S & string,
+    T extends Record<string, unknown> = InferModel<S[K]>,
+  >(args: {
+    model: K;
+    where?: Where<T>;
+    select?: Select<T>;
+    sortBy?: SortBy<T>[];
+    limit?: number;
+    offset?: number;
+    cursor?: Cursor<T>;
+  }) => findMany(this.executor, args.model, this.schema[args.model]!, sqlite, args);
+
+  update = <
+    K extends keyof S & string,
+    T extends Record<string, unknown> = InferModel<S[K]>,
+  >(args: {
+    model: K;
+    where: Where<T>;
+    data: Partial<T>;
+  }) => update(this.executor, args.model, this.schema[args.model]!, sqlite, args);
+
+  updateMany = <
+    K extends keyof S & string,
+    T extends Record<string, unknown> = InferModel<S[K]>,
+  >(args: {
+    model: K;
+    where?: Where<T>;
+    data: Partial<T>;
+  }) => updateMany(this.executor, args.model, this.schema[args.model]!, sqlite, args);
+
+  upsert = <
+    K extends keyof S & string,
+    T extends Record<string, unknown> = InferModel<S[K]>,
+  >(args: {
+    model: K;
+    create: T;
+    update: Partial<T>;
+    where?: Where<T>;
+    select?: Select<T>;
+  }) => upsert(this.executor, args.model, this.schema[args.model]!, sqlite, args);
+
+  delete = <
+    K extends keyof S & string,
+    T extends Record<string, unknown> = InferModel<S[K]>,
+  >(args: {
+    model: K;
+    where: Where<T>;
+  }) => remove(this.executor, args.model, this.schema[args.model]!, sqlite, args);
+
+  deleteMany = <
+    K extends keyof S & string,
+    T extends Record<string, unknown> = InferModel<S[K]>,
+  >(args: {
+    model: K;
+    where?: Where<T>;
+  }) => removeMany(this.executor, args.model, this.schema[args.model]!, sqlite, args);
+
+  count = <K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
+    model: K;
+    where?: Where<T>;
+  }) => count(this.executor, args.model, this.schema[args.model]!, sqlite, args);
 }

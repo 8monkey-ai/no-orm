@@ -2,7 +2,7 @@
  * no-orm Core v1: Canonical Schema and Adapter Specification
  */
 
-// --- SCHEMA SPEC V1 (#2) ---
+// --- SCHEMA SPEC V1 ---
 
 export type Schema = Record<string, Model>;
 
@@ -26,7 +26,7 @@ export interface Index {
   order?: "asc" | "desc";
 }
 
-// --- TYPE INFERENCE V1 (#1) ---
+// --- TYPE INFERENCE V1 ---
 
 export type InferModel<M extends Model> = {
   [K in keyof M["fields"] as M["fields"][K]["nullable"] extends true ? K : never]?: ResolveTSValue<
@@ -52,7 +52,7 @@ type ResolveTSValue<T extends FieldType> = T extends "string"
             ? unknown[]
             : never;
 
-// --- ADAPTER SPEC V1 (#3) ---
+// --- ADAPTER SPEC V1 ---
 
 export interface Adapter<S extends Schema = Schema> {
   /**

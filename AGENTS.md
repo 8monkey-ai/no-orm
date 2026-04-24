@@ -33,14 +33,14 @@ src/
   types.ts              Schema, Adapter interface, Where/SortBy/Cursor types
   index.ts              Public entrypoint (re-exports types.ts)
   adapters/
-    common.ts           Shared PK helpers used by memory + sql adapters
+    common.ts           Shared PK, pagination, and value helpers
     memory.ts           MemoryAdapter (LRU-cache-backed)
-    sql.ts              QueryExecutor, SqlDialect interfaces, SqlAdapter base class
-    postgres.ts         PostgresDialect + driver executors + PostgresAdapter
-    sqlite.ts           SqliteDialect + driver executors + SqliteAdapter
+    sql.ts              QueryExecutor, SqlFormat interfaces, functional helpers
+    postgres.ts         PostgresAdapter (uses sql.ts helpers)
+    sqlite.ts           SqliteAdapter (uses sql.ts helpers)
 ```
 
-Each adapter file is self-contained: dialect config, driver detection, executor factories, and adapter class all live together. There is no separate `dialects/` directory.
+Each adapter file is self-contained: formatting hooks, driver detection, executor factories, and adapter class all live together.
 
 ## Local Commands
 
@@ -57,9 +57,12 @@ Each adapter file is self-contained: dialect config, driver detection, executor 
 
 1. Read the touched feature area first.
 2. Keep edits minimal and localized; avoid broad refactors unless asked.
-3. Update related tests when behavior changes.
-4. Run `bun run check` and `bun test` before considering a change done.
-5. If formatting/linting is impacted, run `bun run format` and `bun run lint`.
+3. Retain existing architectural and defensive comments that explain "why" (e.g. sequential DDL, driver detection order, V8 optimizations).
+4. Update related tests when behavior changes.
+5. Run `bun run check` and `bun test` before considering a change done.
+6. If formatting/linting is impacted, run `bun run format` and `bun run lint`.
+
+- Update this file with new "Lessons Learned" or "Mistakes to Avoid" if a significant architectural shift or subtle bug is encountered.
 
 ## TypeScript Rules
 
@@ -112,44 +115,19 @@ Prefer `for (let i = 0; i < arr.length; i++)` over `for...of` in adapter interna
 
 ### Adapter boundary is the one place where `as T` casts are acceptable
 
-Storage holds `Record<string, unknown>` (RowData) but the adapter interface promises `T`. The cast from `RowData -> T` happens in `applySelect` (memory) and `mapRow` (sql). Keep this boundary thin and document it.
+Storage holds `Record<string, unknown>` (RowData) but the adapter interface promises `T`. The cast from `RowData -> T` happens in `applySelect` (memory) and `toRow` (sql). Keep this boundary thin and document it.
 
-### SqlDialect is a plain object, not a class
+### SqlFormat is a plain object, not a class
 
-Dialects are stateless configuration objects (`PostgresDialect`, `SqliteDialect`). They provide SQL generation functions (placeholder, quote, type mapping, JSON extraction, upsert). Do not add state or instance methods.
+Formatting hooks (quoting, placeholders, type mapping, JSON extraction) are defined as stateless configuration objects (`pg`, `sqlite`). Functional helpers in `sql.ts` receive these hooks to generate database-specific SQL.
+
+### SQL logic is functional and composable
+
+Instead of a base class, `sql.ts` provides pure functions (`find`, `create`, `update`, etc.) that orchestrate SQL generation and execution. Each SQL adapter class (`PostgresAdapter`, `SqliteAdapter`) implements the `Adapter` interface by delegating to these helpers. This composition significantly reduces abstraction leaks and improves readability.
 
 ### QueryExecutor is the driver abstraction
 
-Each database driver (pg Pool, postgres.js, Bun SQL, better-sqlite3, bun:sqlite, async sqlite) gets wrapped into a `QueryExecutor` with uniform `all`/`get`/`run`/`transaction` methods. The executor factory lives in the adapter file next to its dialect.
-
-### Postgres driver detection order matters
-
-Detection is structural (duck-typing). The order must be:
-
-1. Bun SQL — has `unsafe` + `transaction`
-2. postgres.js — has `unsafe` + `begin` (but not `transaction`)
-3. pg — has `query`
-
-If the order changes, Bun SQL gets misidentified as postgres.js.
-
-### SQLite driver detection
-
-- Sync drivers (bun:sqlite, better-sqlite3): have `prepare` but not `all` on the database object.
-- Async driver (sqlite package): has `all`, `get`, `run` directly on the database object.
-
-### DDL in migrate() is sequential
-
-`CREATE TABLE` and `CREATE INDEX` statements run sequentially (not `Promise.all`). Tables must exist before their indexes. Some drivers (SQLite) also can't handle concurrent DDL on one connection.
-
-### Prepared statement caching
-
-All three Postgres drivers use server-side prepared statements, but through different mechanisms:
-
-- **pg**: The executor maintains a bounded Map (max 100) of SQL string to statement name (`q_0`, `q_1`, ...). Named queries enable server-side prepared statement reuse. FIFO eviction when the cache is full.
-- **postgres.js**: Every `sql.unsafe()` call passes `{ prepare: true }`, which tells the driver to use server-side prepared statements. The driver manages its own internal statement name cache.
-- **Bun SQL**: Handles prepared statement caching internally. No explicit option needed.
-
-The sync SQLite executor (better-sqlite3, bun:sqlite) caches compiled `Statement` objects in a bounded Map (max 100) to avoid re-parsing the same SQL on every query. This matches the hebo-gateway pattern.
+Each database driver (pg Pool, postgres.js, Bun SQL, better-sqlite3, bun:sqlite, async sqlite) gets wrapped into a `QueryExecutor` with uniform `all`/`get`/`run`/`transaction` methods. The executor factory lives in the adapter file next to its formatting hooks.
 
 ## Dependency Rules
 
@@ -175,7 +153,7 @@ Every optional peer dep that provides types must also be in `devDependencies` so
 
 ### v1 schema is intentionally minimal
 
-Supported field types: `string`, `number`, `boolean`, `timestamp`, `json`, `json[]`. No defaults, foreign keys, relations, enums, or uniqueness constraints.
+Supported field types: `string`, `number`, `boolean`, `timestamp`, `json`, `json[]`. No defaults, foreign key fields are just primitive types. No relations or automated joins.
 
 ### Validations are out of scope for v1
 
@@ -197,16 +175,6 @@ The schema is passed to the adapter constructor. `migrate()` uses `this.schema` 
 - Cover: CRUD lifecycle, composite primary keys, select projection, all operators (`eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `not_in`), logical composition (`and`, `or`), null handling, JSON path filters, pagination (offset + cursor), sorting with nulls, upsert (insert/update/predicated), updateMany, deleteMany, count, transactions, LRU eviction, duplicate key rejection.
 - When adding a new adapter, add integration tests exercising the full operation set.
 
-## Future Extension: GreptimeDB
-
-The current design is open for a GreptimeDB adapter without interface changes:
-
-- Provide a custom `SqlDialect` (type mapping, JSON extraction, upsert syntax).
-- Subclass `SqlAdapter` and override `migrate()` for GreptimeDB-specific DDL (`TIME INDEX`, `PARTITION BY`, `SKIPPING INDEX`).
-- Override `mapInput`/`mapRow` if per-driver parameter mapping is needed (e.g. BigInt timestamps for postgres.js, string timestamps for pg).
-
-No changes to `QueryExecutor`, `SqlDialect`, or `Adapter` interfaces are required.
-
 ## Guardrails
 
 - Do not remove or rename public exports without explicit request.
@@ -225,3 +193,8 @@ No changes to `QueryExecutor`, `SqlDialect`, or `Adapter` interfaces are require
 - [ ] No object spreads introduced in adapter hot paths.
 - [ ] No dead code (unused exports, unreachable branches).
 - [ ] README updated if public API changed.
+
+## Lessons Learned & Mistakes to Avoid
+
+- **V8 hot paths**: Avoid object spreads and `delete` in adapter CRUD loops to maintain peak performance (hidden class stability).
+- **Unified Logic**: Shared logic for keyset pagination (criteria building) and JSON path extraction should live in `common.ts` to ensure consistency between Memory and SQL adapters.

@@ -1,7 +1,13 @@
 import { LRUCache } from "lru-cache";
 
 import type { Adapter, Cursor, InferModel, Schema, Select, SortBy, Where } from "../types";
-import { assertNoPrimaryKeyUpdates, getIdentityValues, getPrimaryKeyFields } from "./common";
+import {
+  assertNoPrimaryKeyUpdates,
+  getIdentityValues,
+  getNestedValue,
+  getPaginationCriteria,
+  getPrimaryKeyFields,
+} from "./common";
 
 type RowData = Record<string, unknown>;
 type ModelCache = LRUCache<string, RowData>;
@@ -284,7 +290,7 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
       return false;
     }
 
-    const recordVal = this.getValue(record, where.field, where.path);
+    const recordVal = getNestedValue(record, where.field, where.path);
 
     switch (where.op) {
       case "eq":
@@ -292,13 +298,13 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
       case "ne":
         return recordVal !== where.value;
       case "gt":
-        return this.compareValues(recordVal, where.value) > 0;
+        return compareValues(recordVal, where.value) > 0;
       case "gte":
-        return this.compareValues(recordVal, where.value) >= 0;
+        return compareValues(recordVal, where.value) >= 0;
       case "lt":
-        return this.compareValues(recordVal, where.value) < 0;
+        return compareValues(recordVal, where.value) < 0;
       case "lte":
-        return this.compareValues(recordVal, where.value) <= 0;
+        return compareValues(recordVal, where.value) <= 0;
       case "in":
         return Array.isArray(where.value) && where.value.includes(recordVal);
       case "not_in":
@@ -324,35 +330,9 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     return res as T;
   }
 
-  private getValue(record: RowData, field: string, path?: string[]): unknown {
-    let val: unknown = record[field];
-    if (path !== undefined && path.length > 0) {
-      for (let i = 0; i < path.length; i++) {
-        if (typeof val !== "object" || val === null || Array.isArray(val)) return undefined;
-        // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- narrowed by object check above
-        val = (val as RowData)[path[i]!];
-      }
-    }
-    return val;
-  }
-
   private applyCursor(results: RowData[], cursor: Cursor, sortBy?: SortBy[]): RowData[] {
     const cursorValues = cursor.after as Record<string, unknown>;
-    const criteria: { field: string; direction: "asc" | "desc"; path?: string[] }[] = [];
-
-    if (sortBy !== undefined && sortBy.length > 0) {
-      for (let i = 0; i < sortBy.length; i++) {
-        const s = sortBy[i]!;
-        if (cursorValues[s.field] !== undefined) {
-          criteria.push({ field: s.field, direction: s.direction ?? "asc", path: s.path });
-        }
-      }
-    } else {
-      const keys = Object.keys(cursorValues);
-      for (let i = 0; i < keys.length; i++) {
-        criteria.push({ field: keys[i]!, direction: "asc" });
-      }
-    }
+    const criteria = getPaginationCriteria(cursor, sortBy);
 
     if (criteria.length === 0) return results;
 
@@ -364,9 +344,9 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
       // (a > ?) OR (a = ? AND b > ?) OR (a = ? AND b = ? AND c > ?)
       for (let j = 0; j < criteria.length; j++) {
         const curr = criteria[j]!;
-        const recordVal = this.getValue(record, curr.field, curr.path);
+        const recordVal = getNestedValue(record, curr.field, curr.path);
         const cursorVal = cursorValues[curr.field];
-        const comp = this.compareValues(recordVal, cursorVal);
+        const comp = compareValues(recordVal, cursorVal);
 
         if (comp === 0) continue;
         if (curr.direction === "desc" ? comp < 0 : comp > 0) {
@@ -383,28 +363,32 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     return results.toSorted((a, b) => {
       for (let i = 0; i < sortBy.length; i++) {
         const s = sortBy[i]!;
-        const valA = this.getValue(a, s.field, s.path);
-        const valB = this.getValue(b, s.field, s.path);
+        const valA = getNestedValue(a, s.field, s.path);
+        const valB = getNestedValue(b, s.field, s.path);
         if (valA === valB) continue;
-        const comparison = this.compareValues(valA, valB);
+        const comparison = compareValues(valA, valB);
         if (comparison === 0) continue;
         return s.direction === "desc" ? -comparison : comparison;
       }
       return 0;
     });
   }
+}
 
-  private compareValues(left: unknown, right: unknown): number {
-    if (left === right) return 0;
-    if (left === undefined || left === null) return -1;
-    if (right === undefined || right === null) return 1;
-    if (typeof left !== typeof right) return 0;
-    if (typeof left === "string" && typeof right === "string") {
-      return left < right ? -1 : left > right ? 1 : 0;
-    }
-    if (typeof left === "number" && typeof right === "number") {
-      return left < right ? -1 : left > right ? 1 : 0;
-    }
-    return 0;
+/**
+ * Null-safe comparison of primitive values.
+ * Treats null/undefined as the smallest possible values.
+ */
+function compareValues(left: unknown, right: unknown): number {
+  if (left === right) return 0;
+  if (left === undefined || left === null) return -1;
+  if (right === undefined || right === null) return 1;
+  if (typeof left !== typeof right) return 0;
+  if (typeof left === "string" && typeof right === "string") {
+    return left < right ? -1 : left > right ? 1 : 0;
   }
+  if (typeof left === "number" && typeof right === "number") {
+    return left < right ? -1 : left > right ? 1 : 0;
+  }
+  return 0;
 }
