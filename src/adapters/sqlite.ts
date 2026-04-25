@@ -80,6 +80,8 @@ function isSyncSqlite(driver: SqliteDriver): driver is BunDatabase | BetterSqlit
 /**
  * Structural interface for the shared subset of BunDatabase and BetterSqlite3Database
  * `prepare()` APIs. Their full type signatures differ but both satisfy this shape.
+ * This allows the adapter to work with both drivers without direct dependencies
+ * on their respective type libraries.
  */
 type SyncStatement = {
   all(...params: unknown[]): unknown[];
@@ -93,7 +95,7 @@ interface SyncDriver {
 
 // Caches compiled Statement objects per SQL string to avoid re-parsing on every query.
 // Uses a simple Map with FIFO eviction at MAX_CACHE_SIZE.
-function createSyncSqliteExecutor(driver: SyncDriver): QueryExecutor {
+function createSyncSqliteExecutor(driver: SyncDriver, inTransaction = false): QueryExecutor {
   const cache = new Map<string, SyncStatement>();
 
   function getStmt(sql: string): SyncStatement {
@@ -112,12 +114,12 @@ function createSyncSqliteExecutor(driver: SyncDriver): QueryExecutor {
   return {
     all: (sql, params) => {
       const result = getStmt(sql).all(...(params ?? []));
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- SQLite rows are plain objects
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- SQLite rows are plain objects matching RowData
       return Promise.resolve(result as Record<string, unknown>[]);
     },
     get: (sql, params) => {
       const result = getStmt(sql).get(...(params ?? []));
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- SQLite row is a plain object or undefined
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- SQLite row is a plain object or undefined, matching RowData
       return Promise.resolve(result as Record<string, unknown> | undefined);
     },
     run: (sql, params) => {
@@ -127,7 +129,7 @@ function createSyncSqliteExecutor(driver: SyncDriver): QueryExecutor {
     transaction: async (fn) => {
       getStmt("BEGIN").run();
       try {
-        const res = await fn(createSyncSqliteExecutor(driver));
+        const res = await fn(createSyncSqliteExecutor(driver, true));
         getStmt("COMMIT").run();
         return res;
       } catch (e) {
@@ -135,10 +137,11 @@ function createSyncSqliteExecutor(driver: SyncDriver): QueryExecutor {
         throw e;
       }
     },
+    inTransaction,
   };
 }
 
-function createAsyncSqliteExecutor(driver: SqliteDatabase): QueryExecutor {
+function createAsyncSqliteExecutor(driver: SqliteDatabase, inTransaction = false): QueryExecutor {
   return {
     all: (sql, params) => driver.all(sql, params),
     get: (sql, params) => driver.get(sql, params),
@@ -149,7 +152,7 @@ function createAsyncSqliteExecutor(driver: SqliteDatabase): QueryExecutor {
     transaction: async (fn) => {
       await driver.run("BEGIN");
       try {
-        const res = await fn(createAsyncSqliteExecutor(driver));
+        const res = await fn(createAsyncSqliteExecutor(driver, true));
         await driver.run("COMMIT");
         return res;
       } catch (e) {
@@ -157,12 +160,13 @@ function createAsyncSqliteExecutor(driver: SqliteDatabase): QueryExecutor {
         throw e;
       }
     },
+    inTransaction,
   };
 }
 
 function createSqliteExecutor(driver: SqliteDriver): QueryExecutor {
   if (isSyncSqlite(driver)) {
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- BunDatabase and BetterSqlite3Database both satisfy SyncDriver structurally
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver is structurally compatible with SyncDriver
     return createSyncSqliteExecutor(driver as unknown as SyncDriver);
   }
   return createAsyncSqliteExecutor(driver as SqliteDatabase);
@@ -183,6 +187,10 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
   migrate = () => migrate(this.executor, this.schema, sqlite);
 
   transaction<T>(fn: (tx: Adapter<S>) => Promise<T>): Promise<T> {
+    if (this.executor.inTransaction) {
+      // Re-use current adapter if already in a transaction.
+      return fn(this);
+    }
     return this.executor.transaction((exec) => fn(new SqliteAdapter(this.schema, exec)));
   }
 

@@ -3,7 +3,7 @@ import {
   assertNoPrimaryKeyUpdates,
   buildIdentityFilter,
   getIdentityValues,
-  getPaginationCriteria,
+  getPaginationFilter,
   getPrimaryKeyFields,
   mapNumeric,
 } from "./common";
@@ -15,6 +15,7 @@ export interface QueryExecutor {
   get(sql: string, params?: unknown[]): Promise<Record<string, unknown> | undefined>;
   run(sql: string, params?: unknown[]): Promise<{ changes: number }>;
   transaction<T>(fn: (executor: QueryExecutor) => Promise<T>): Promise<T>;
+  readonly inTransaction: boolean;
 }
 
 export interface SqlFormat {
@@ -24,15 +25,19 @@ export interface SqlFormat {
   jsonExtract(column: string, path: string[], isNumeric?: boolean, isBoolean?: boolean): string;
   /** Maps a boolean to its SQL parameter value. Defaults to pass-through if omitted. */
   mapBoolean?(value: boolean): unknown;
-  upsert?(args: {
+  /** Generates result projection, e.g. "RETURNING id, name" */
+  formatReturning?(select: string): string;
+  /**
+   * Generates a full upsert statement.
+   * This allows adapters to choose between ON CONFLICT, ON DUPLICATE KEY, or MERGE.
+   */
+  formatUpsert?(args: {
     table: string;
-    insertColumns: string[];
-    insertPlaceholders: string[];
-    updateColumns: string[];
-    conflictColumns: string[];
-    select?: readonly string[];
-    whereSql?: string;
-  }): { sql: string; params?: unknown[] };
+    insert: { columns: string[]; placeholders: string[] };
+    update?: { assignments: string[]; where?: string };
+    conflict: { columns: string[] };
+    returning?: string;
+  }): string;
 }
 
 export function isQueryExecutor(obj: unknown): obj is QueryExecutor {
@@ -46,6 +51,39 @@ export function isQueryExecutor(obj: unknown): obj is QueryExecutor {
 }
 
 // --- SQL Builders & Mappers ---
+
+function getReturning(fmt: SqlFormat, select: string): string {
+  if (fmt.formatReturning) return fmt.formatReturning(select);
+  return `RETURNING ${select}`;
+}
+
+function getUpsert(
+  fmt: SqlFormat,
+  args: {
+    table: string;
+    insert: { columns: string[]; placeholders: string[] };
+    update?: { assignments: string[]; where?: string };
+    conflict: { columns: string[] };
+    returning?: string;
+  },
+): string {
+  if (fmt.formatUpsert) return fmt.formatUpsert(args);
+
+  const conflict = `ON CONFLICT (${args.conflict.columns.join(", ")})`;
+  let updateAction = "DO NOTHING";
+  if (args.update) {
+    updateAction = `DO UPDATE SET ${args.update.assignments.join(", ")}`;
+    if (args.update.where !== undefined && args.update.where !== "") {
+      updateAction += ` WHERE ${args.update.where}`;
+    }
+  }
+
+  let sql = `INSERT INTO ${fmt.quote(args.table)} (${args.insert.columns.join(", ")}) VALUES (${args.insert.placeholders.join(", ")}) ${conflict} ${updateAction}`;
+  if (args.returning !== undefined && args.returning !== "") {
+    sql += ` ${args.returning}`;
+  }
+  return sql;
+}
 
 export function toSelect(fmt: SqlFormat, select?: Select<Record<string, unknown>>): string {
   if (!select) return "*";
@@ -110,7 +148,7 @@ export function toRow<T extends Record<string, unknown>>(
       res[k] = val;
     }
   }
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- RowData -> T at adapter boundary after field mapping
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- mapped fields match the shape of T
   return res as T;
 }
 
@@ -235,29 +273,12 @@ export function toWhere(
   }
 
   if (cursor) {
-    const cursorValues = cursor.after as Record<string, unknown>;
-    const criteria = getPaginationCriteria(cursor, sortBy);
-
-    if (criteria.length > 0) {
-      const orClauses = [];
-      for (let i = 0; i < criteria.length; i++) {
-        const andClauses = [];
-        for (let j = 0; j < i; j++) {
-          const prev = criteria[j]!;
-          andClauses.push(
-            `${toColumnExpr(fmt, model, prev.field, prev.path, cursorValues[prev.field])} = ${fmt.placeholder(nextIndex++)}`,
-          );
-          params.push(cursorValues[prev.field]);
-        }
-        const curr = criteria[i]!;
-        const op = curr.direction === "desc" ? "<" : ">";
-        andClauses.push(
-          `${toColumnExpr(fmt, model, curr.field, curr.path, cursorValues[curr.field])} ${op} ${fmt.placeholder(nextIndex++)}`,
-        );
-        params.push(cursorValues[curr.field]);
-        orClauses.push(`(${andClauses.join(" AND ")})`);
-      }
-      parts.push(`(${orClauses.join(" OR ")})`);
+    const paginationWhere = getPaginationFilter(cursor, sortBy);
+    if (paginationWhere) {
+      const built = toWhereRecursive(fmt, model, paginationWhere, nextIndex);
+      parts.push(`(${built.sql})`);
+      for (let i = 0; i < built.params.length; i++) params.push(built.params[i]);
+      nextIndex += built.params.length;
     }
   }
 
@@ -343,24 +364,25 @@ export async function create<T extends Record<string, unknown>>(
     values.push(insertData[field]);
   }
 
-  const sql = `INSERT INTO ${fmt.quote(table)} (${quotedFields.join(", ")}) VALUES (${placeholders.join(", ")}) RETURNING ${toSelect(
+  const sqlSelect = toSelect(
     fmt,
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Select<T> -> Select<Record<string, unknown>> is safe for SQL gen
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Select<T> is a subtype of string[] because model keys are strings
     select as Select<Record<string, unknown>>,
-  )}`;
+  );
+  const sql = `INSERT INTO ${fmt.quote(table)} (${quotedFields.join(", ")}) VALUES (${placeholders.join(", ")}) ${getReturning(fmt, sqlSelect)}`;
   const row = await exec.get(sql, values);
 
   if (!row) {
     const result = await find(exec, table, model, fmt, {
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where -> Where<T>: field names match at runtime
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- field names in source T match model fields at runtime
       where: buildIdentityFilter(model, data) as Where<T>,
       select,
     });
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- result is T if found, and we just inserted it
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- result is T (or null) from find(), and we just inserted it
     return result as T;
   }
 
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Select<T> -> Select<Record<string, unknown>> is safe for mapping
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- row is mapped to T via toRow
   return toRow(model, row, select as Select<Record<string, unknown>>);
 }
 
@@ -372,15 +394,15 @@ export async function find<T extends Record<string, unknown>>(
   args: { where: Where<T>; select?: Select<T> },
 ): Promise<T | null> {
   const { where, select } = args;
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where<T> -> Where is safe for SQL gen
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where<T> is compatible with Where for SQL generation
   const built = toWhere(fmt, model, where as Where);
   const sql = `SELECT ${toSelect(
     fmt,
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Select<T> -> Select<Record<string, unknown>> is safe for SQL gen
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Select<T> is a subtype of string[] because model keys are strings
     select as Select<Record<string, unknown>>,
   )} FROM ${fmt.quote(table)} WHERE ${built.sql} LIMIT 1`;
   const row = await exec.get(sql, built.params);
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Select<T> -> Select<Record<string, unknown>> is safe for mapping
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- row is mapped to T via toRow
   return row ? toRow(model, row, select as Select<Record<string, unknown>>) : null;
 }
 
@@ -402,7 +424,7 @@ export async function findMany<T extends Record<string, unknown>>(
   const params: unknown[] = [];
   const sqlSelect = toSelect(
     fmt,
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Select<T> -> Select<Record<string, unknown>> is safe for SQL gen
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Select<T> is a subtype of string[] because model keys are strings
     select as Select<Record<string, unknown>>,
   );
   let sql = `SELECT ${sqlSelect} FROM ${fmt.quote(table)}`;
@@ -410,11 +432,11 @@ export async function findMany<T extends Record<string, unknown>>(
   const built = toWhere(
     fmt,
     model,
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where<T> -> Where is safe for SQL gen
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where<T> is compatible with Where for SQL generation
     where as Where,
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Cursor<T> -> Cursor is safe for SQL gen
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Cursor<T> is compatible with Cursor for SQL generation
     cursor as Cursor,
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- SortBy<T>[] -> SortBy[] is safe for SQL gen
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- SortBy<T>[] is compatible with SortBy[] for SQL generation
     sortBy as SortBy[] | undefined,
   );
   if (built.sql !== "1=1") {
@@ -446,7 +468,7 @@ export async function findMany<T extends Record<string, unknown>>(
   const rows = await exec.all(sql, params);
   const result: T[] = [];
   for (let i = 0; i < rows.length; i++) {
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Select<T> -> Select<Record<string, unknown>> is safe for mapping
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- rows are mapped to T via toRow
     result.push(toRow(model, rows[i]!, select as Select<Record<string, unknown>>));
   }
   return result;
@@ -474,9 +496,9 @@ export async function update<T extends Record<string, unknown>>(
     params.push(updateData[field]);
   }
 
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where<T> -> Where is safe for SQL gen
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where<T> is compatible with Where for SQL generation
   const built = toWhere(fmt, model, where as Where, undefined, undefined, params.length);
-  const sql = `UPDATE ${fmt.quote(table)} SET ${assignments.join(", ")} WHERE ${built.sql} RETURNING *`;
+  const sql = `UPDATE ${fmt.quote(table)} SET ${assignments.join(", ")} WHERE ${built.sql} ${getReturning(fmt, "*")}`;
   for (let i = 0; i < built.params.length; i++) params.push(built.params[i]);
 
   const row = await exec.get(sql, params);
@@ -507,7 +529,7 @@ export async function updateMany<T extends Record<string, unknown>>(
   }
 
   let sql = `UPDATE ${fmt.quote(table)} SET ${assignments.join(", ")}`;
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where<T> -> Where is safe for SQL gen
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where<T> is compatible with Where for SQL generation
   const built = toWhere(fmt, model, where as Where, undefined, undefined, params.length);
   if (built.sql !== "1=1") {
     sql += ` WHERE ${built.sql}`;
@@ -558,56 +580,39 @@ export async function upsert<T extends Record<string, unknown>>(
 
   let whereSql = "";
   if (where) {
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where<T> -> Where is safe for SQL gen
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where<T> is compatible with Where for SQL generation
     const built = toWhere(fmt, model, where as Where, undefined, undefined, params.length);
     whereSql = built.sql;
     for (let i = 0; i < built.params.length; i++) params.push(built.params[i]);
   }
 
-  if (fmt.upsert) {
-    const { sql, params: upsertParams } = fmt.upsert({
-      table,
-      insertColumns,
-      insertPlaceholders,
-      updateColumns,
-      conflictColumns: pkFields,
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Select<T> -> string[] is safe for upsert hook
-      select: select as string[] | undefined,
-      whereSql,
-    });
-    const row = await exec.get(sql, upsertParams ?? params);
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Select<T> -> Select<Record<string, unknown>> is safe for mapping
-    if (row) return toRow(model, row, select as Select<Record<string, unknown>>);
-  } else {
-    const conflictTarget = [];
-    for (let i = 0; i < pkFields.length; i++) conflictTarget.push(fmt.quote(pkFields[i]!));
+  const sqlSelect = toSelect(
+    fmt,
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Select<T> is a subtype of string[] because model keys are strings
+    select as Select<Record<string, unknown>>,
+  );
 
-    let updateSet = "";
-    if (updateFields.length > 0) {
-      const sets = [];
-      for (let i = 0; i < updateFields.length; i++) {
-        const field = updateFields[i]!;
-        sets.push(`${fmt.quote(field)} = ${fmt.placeholder(createFields.length + i)}`);
-      }
-      updateSet = `DO UPDATE SET ${sets.join(", ")}`;
-      if (whereSql) updateSet += ` WHERE ${whereSql}`;
-    } else {
-      updateSet = "DO NOTHING";
-    }
-
-    const sql = `INSERT INTO ${fmt.quote(table)} (${insertColumns.join(", ")}) VALUES (${insertPlaceholders.join(", ")}) ON CONFLICT (${conflictTarget.join(", ")}) ${updateSet} RETURNING ${toSelect(
-      fmt,
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Select<T> -> Select<Record<string, unknown>> is safe for SQL gen
-      select as Select<Record<string, unknown>>,
-    )}`;
-    const row = await exec.get(sql, params);
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Select<T> -> Select<Record<string, unknown>> is safe for mapping
-    if (row) return toRow(model, row, select as Select<Record<string, unknown>>);
+  const assignments: string[] = [];
+  for (let i = 0; i < updateFields.length; i++) {
+    const field = updateFields[i]!;
+    assignments.push(`${fmt.quote(field)} = ${fmt.placeholder(createFields.length + i)}`);
   }
+
+  const sql = getUpsert(fmt, {
+    table,
+    insert: { columns: insertColumns, placeholders: insertPlaceholders },
+    update: updateFields.length > 0 ? { assignments, where: whereSql || undefined } : undefined,
+    conflict: { columns: pkFields.map((f) => fmt.quote(f)) },
+    returning: getReturning(fmt, sqlSelect),
+  });
+
+  const row = await exec.get(sql, params);
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- row is mapped to T via toRow
+  if (row) return toRow(model, row, select as Select<Record<string, unknown>>);
 
   const identityValues = getIdentityValues(model, cData);
   const existing = await find(exec, table, model, fmt, {
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where -> Where<T>: field names match at runtime
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- field names in identityValues match model fields at runtime
     where: buildIdentityFilter(model, identityValues) as Where<T>,
     select,
   });
@@ -623,7 +628,7 @@ export async function remove<T extends Record<string, unknown>>(
   args: { where: Where<T> },
 ): Promise<void> {
   const { where } = args;
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where<T> -> Where is safe for SQL gen
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where<T> is compatible with Where for SQL generation
   const built = toWhere(fmt, model, where as Where);
   await exec.run(`DELETE FROM ${fmt.quote(table)} WHERE ${built.sql}`, built.params);
 }
@@ -636,7 +641,7 @@ export async function removeMany<T extends Record<string, unknown>>(
   args: { where?: Where<T> },
 ): Promise<number> {
   const { where } = args;
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where<T> -> Where is safe for SQL gen
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where<T> is compatible with Where for SQL generation
   const built = toWhere(fmt, model, where as Where);
   let sql = `DELETE FROM ${fmt.quote(table)}`;
   if (built.sql !== "1=1") sql += ` WHERE ${built.sql}`;
@@ -652,7 +657,7 @@ export async function count<T extends Record<string, unknown>>(
   args: { where?: Where<T> },
 ): Promise<number> {
   const { where } = args;
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where<T> -> Where is safe for SQL gen
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where<T> is compatible with Where for SQL generation
   const built = toWhere(fmt, model, where as Where);
   let sql = `SELECT COUNT(*) as count FROM ${fmt.quote(table)}`;
   if (built.sql !== "1=1") sql += ` WHERE ${built.sql}`;
@@ -663,23 +668,37 @@ export async function count<T extends Record<string, unknown>>(
 }
 
 /**
- * FUTURE EXTENSION: GreptimeDB
+ * FUTURE EXTENSION: GreptimeDB & MySQL
  *
- * To implement a GreptimeDB adapter using these helpers:
+ * Lessons learned from hebo-gateway and typical SQL quirks:
  *
- * 1. Provide a custom `SqlFormat` object for GreptimeDB syntax:
- *    - Quoting identifiers (e.g. backticks).
- *    - Type mapping (e.g. `TIMESTAMP` for time-series columns).
- *    - JSON extraction syntax (if supported).
- *    - Upsert syntax (GreptimeDB uses `INSERT INTO ... ON DUPLICATE KEY UPDATE` style or similar).
+ * 1. GreptimeDB:
+ *    - Supports multiple protocols (Postgres, MySQL). When using Postgres wire protocol
+ *      (via `PostgresAdapter`), use double quotes (") for identifiers. When using MySQL
+ *      protocol, use backticks (`).
+ *    - Mutation responses over Bun.SQL might not populate `count` but provide a `command` string
+ *      like "OK 1". Parsed in `postgres.ts`.
+ *    - JSON strings can contain Rust-style Unicode escapes (\u{xxxx}) which are invalid JSON.
+ *      May need a `mapJsonOutput` hook in `SqlFormat`. Empty JSON strings ("") or "{}"
+ *      should be normalized to {}. To avoid driver crashes, JSON columns might need
+ *      to be cast to STRING on the wire (e.g. `col::STRING`).
+ *    - DDL: `TIME INDEX` is mandatory. May also need `PARTITION BY`, `WITH` (e.g. merge_mode),
+ *      or `SKIPPING INDEX` for performance optimizations.
+ *    - JSON: Specialized functions like `json_get_string` might be required instead of
+ *      standard Postgres operators like `->>`.
+ *    - Batch inserts: When using a time index as part of uniqueness, adding a slight offset
+ *      (e.g. +1ms) per item in a batch avoids timestamp collisions.
  *
- * 2. Implement the `Adapter` interface and delegate to `sql.ts` helpers.
+ * 2. MySQL / MariaDB:
+ *    - Quoting uses backticks (`) instead of double quotes ("). Note that backticks
+ *      within identifiers might need to be escaped by doubling them (``).
+ *    - Upsert uses `ON DUPLICATE KEY UPDATE` instead of `ON CONFLICT`.
+ *    - Does not support `CREATE INDEX IF NOT EXISTS`. Must be handled via try/catch in `migrate`.
+ *    - Does not support `RETURNING`. `create` and `upsert` must fall back to a second `find` call.
  *
- * 3. Override `migrate()` logic if GreptimeDB-specific DDL is needed:
- *    - `TIME INDEX` is mandatory for GreptimeDB tables.
- *    - `PARTITION BY` for horizontal scaling.
- *    - `SKIPPING INDEX` for performance optimizations.
- *
- * 4. Override `toInput`/`toRow` logic if per-driver parameter mapping is needed
- *    (e.g. BigInt timestamps for one driver vs ISO strings for another).
+ * 3. General SQL:
+ *    - Some databases don't support parameters in `LIMIT` clauses. May need a `limitAsLiteral` flag.
+ *    - May need to override `toInput`/`toRow` logic if per-driver parameter mapping is needed
+ *      (e.g. Date to Number/BigInt, or BigInt to Number).
+ *    - Indexing: Different types like `BRIN` might not support `ASC`/`DESC` or require `USING` syntax.
  */

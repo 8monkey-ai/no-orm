@@ -5,7 +5,7 @@ import {
   assertNoPrimaryKeyUpdates,
   getIdentityValues,
   getNestedValue,
-  getPaginationCriteria,
+  getPaginationFilter,
   getPrimaryKeyFields,
 } from "./common";
 
@@ -37,6 +37,9 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
   }
 
   transaction<T>(fn: (tx: Adapter<S>) => Promise<T>): Promise<T> {
+    // MemoryAdapter is synchronous and doesn't support real ACID transactions.
+    // We simply return the current instance to satisfy the interface and
+    // support nesting by reusing the same adapter.
     return fn(this);
   }
 
@@ -94,12 +97,12 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     }
 
     if (cursor !== undefined) {
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- SortBy<T>.field is a subtype of string, safe for internal use
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- SortBy<T>.field is a subtype of string, which matches the Record key type
       results = this.applyCursor(results, cursor, sortBy as SortBy[] | undefined);
     }
 
     if (sortBy !== undefined && sortBy.length > 0) {
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- same as above
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- SortBy<T>.field is a subtype of string, which matches the Record key type
       results = this.applySort(results, sortBy as SortBy[]);
     }
 
@@ -319,42 +322,27 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
    * interface promises T. This is the single boundary where the cast occurs.
    */
   private applySelect<T extends Record<string, unknown>>(record: RowData, select?: Select<T>): T {
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- RowData -> T at adapter boundary
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- record is mapped to T via shallow copy and optional projection
     if (select === undefined) return Object.assign({}, record) as T;
     const res: RowData = {};
     for (let i = 0; i < select.length; i++) {
       const k = select[i]!;
       res[k] = record[k] ?? null;
     }
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- RowData -> T at adapter boundary
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- record is mapped to T via shallow copy and optional projection
     return res as T;
   }
 
   private applyCursor(results: RowData[], cursor: Cursor, sortBy?: SortBy[]): RowData[] {
-    const cursorValues = cursor.after as Record<string, unknown>;
-    const criteria = getPaginationCriteria(cursor, sortBy);
-
-    if (criteria.length === 0) return results;
+    const paginationWhere = getPaginationFilter(cursor, sortBy);
+    if (!paginationWhere) return results;
 
     const filtered: RowData[] = [];
     for (let i = 0; i < results.length; i++) {
       const record = results[i]!;
-      let match = false;
-      // Lexicographic keyset pagination:
-      // (a > ?) OR (a = ? AND b > ?) OR (a = ? AND b = ? AND c > ?)
-      for (let j = 0; j < criteria.length; j++) {
-        const curr = criteria[j]!;
-        const recordVal = getNestedValue(record, curr.field, curr.path);
-        const cursorVal = cursorValues[curr.field];
-        const comp = compareValues(recordVal, cursorVal);
-
-        if (comp === 0) continue;
-        if (curr.direction === "desc" ? comp < 0 : comp > 0) {
-          match = true;
-        }
-        break;
+      if (this.evaluateWhere(paginationWhere, record)) {
+        filtered.push(record);
       }
-      if (match) filtered.push(record);
     }
     return filtered;
   }

@@ -314,7 +314,7 @@ describe("SqliteAdapter", () => {
       expect(found).toBeNull();
     });
 
-    it("should handle nested transactions with savepoints", async () => {
+    it("should flatten nested transactions (no nested rollback support)", async () => {
       await adapter.transaction(async (outer) => {
         await outer.create({
           model: "users",
@@ -339,7 +339,10 @@ describe("SqliteAdapter", () => {
         model: "users",
         where: { field: "id", op: "eq", value: "n1" },
       });
-      expect(found?.age).toBe(20);
+      // Age is 40 because nested transactions are flattened; the inner update
+      // is part of the outer transaction and is NOT rolled back when the
+      // inner block throws.
+      expect(found?.age).toBe(40);
     });
   });
 

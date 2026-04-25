@@ -75,7 +75,7 @@ All internal method signatures must use `unknown` or concrete types, never `any`
 When a type assertion is unavoidable (e.g. `RowData -> T` at adapter boundaries), use `eslint-disable-next-line` with a short reason:
 
 ```ts
-// eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- RowData -> T at adapter boundary
+// eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- mapped fields match the shape of T
 return res as T;
 ```
 

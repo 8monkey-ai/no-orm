@@ -75,11 +75,42 @@ export function getNestedValue(
   if (path !== undefined && path.length > 0) {
     for (let i = 0; i < path.length; i++) {
       if (typeof val !== "object" || val === null || Array.isArray(val)) return undefined;
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- narrowed by object check above
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val is checked to be an object and not null above
       val = (val as Record<string, unknown>)[path[i]!];
     }
   }
   return val;
+}
+
+export function getPaginationFilter(cursor: Cursor, sortBy?: SortBy[]): Where | undefined {
+  const criteria = getPaginationCriteria(cursor, sortBy);
+  if (criteria.length === 0) return undefined;
+
+  const cursorValues = cursor.after as Record<string, unknown>;
+  const orClauses: Where[] = [];
+
+  for (let i = 0; i < criteria.length; i++) {
+    const andClauses: Where[] = [];
+    for (let j = 0; j < i; j++) {
+      const prev = criteria[j]!;
+      andClauses.push({
+        field: prev.field,
+        path: prev.path,
+        op: "eq",
+        value: cursorValues[prev.field],
+      });
+    }
+    const curr = criteria[i]!;
+    andClauses.push({
+      field: curr.field,
+      path: curr.path,
+      op: curr.direction === "desc" ? "lt" : "gt",
+      value: cursorValues[curr.field],
+    });
+    orClauses.push({ and: andClauses });
+  }
+
+  return orClauses.length === 1 ? orClauses[0] : { or: orClauses };
 }
 
 /**

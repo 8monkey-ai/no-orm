@@ -58,31 +58,6 @@ const pg: SqlFormat = {
     if (isBoolean === true) return `(${base})::boolean`;
     return base;
   },
-  upsert(args) {
-    const { table, insertColumns, insertPlaceholders, updateColumns, conflictColumns, whereSql } =
-      args;
-    const pk: string[] = [];
-    for (let i = 0; i < conflictColumns.length; i++) {
-      pk.push(this.quote(conflictColumns[i]!));
-    }
-
-    let updateSet = "";
-    if (updateColumns.length > 0) {
-      const sets = [];
-      for (let i = 0; i < updateColumns.length; i++) {
-        const col = updateColumns[i]!;
-        sets.push(`${this.quote(col)} = EXCLUDED.${this.quote(col)}`);
-      }
-      updateSet = `DO UPDATE SET ${sets.join(", ")}`;
-      if (whereSql !== undefined && whereSql !== "") updateSet += ` WHERE ${whereSql}`;
-    } else {
-      updateSet = "DO NOTHING";
-    }
-
-    return {
-      sql: `INSERT INTO ${this.quote(table)} (${insertColumns.join(", ")}) VALUES (${insertPlaceholders.join(", ")}) ON CONFLICT (${pk.join(", ")}) ${updateSet} RETURNING *`,
-    };
-  },
 };
 
 // --- Driver detection ---
@@ -109,9 +84,12 @@ function isPg(driver: PostgresDriver): driver is PgClient | PgPool | PgPoolClien
 // prepared statements. The driver manages statement name caching internally.
 // Works for both Sql (top-level) and TransactionSql (inside begin/savepoint) since
 // both extend ISql which provides `unsafe()`.
-function createPostgresJsExecutor(sql: postgres.Sql | postgres.TransactionSql): QueryExecutor {
+function createPostgresJsExecutor(
+  sql: postgres.Sql | postgres.TransactionSql,
+  inTransaction = false,
+): QueryExecutor {
   const run = (query: string, params?: unknown[]) =>
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- postgres.js params type is narrower than unknown[]
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- postgres.js params type is a stricter version of unknown[]
     sql.unsafe(query, params as postgres.ParameterOrJSON<never>[], { prepare: true });
 
   return {
@@ -130,24 +108,30 @@ function createPostgresJsExecutor(sql: postgres.Sql | postgres.TransactionSql): 
     transaction: <T>(fn: (executor: QueryExecutor) => Promise<T>) => {
       // Top-level Sql uses begin(); TransactionSql uses savepoint() for nesting
       if ("begin" in sql) {
-        // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- UnwrapPromiseArray<T> = T for single promises
-        return sql.begin((tx) => fn(createPostgresJsExecutor(tx))) as Promise<T>;
+        // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- T matches return type of fn
+        return sql.begin((tx) => fn(createPostgresJsExecutor(tx, true))) as Promise<T>;
       }
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- same as above
-      return sql.savepoint((tx) => fn(createPostgresJsExecutor(tx))) as Promise<T>;
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- T matches return type of fn
+      return sql.savepoint((tx) => fn(createPostgresJsExecutor(tx, true))) as Promise<T>;
     },
+    inTransaction,
   };
 }
 
 // Bun SQL: uses `sql.unsafe(query, params)`. No prepare option — the driver
 // manages prepared statements internally.
-function createBunSqlExecutor(driver: Record<string, unknown>): QueryExecutor {
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- extracting unsafe() from Bun SQL driver
+function createBunSqlExecutor(
+  driver: Record<string, unknown>,
+  inTransaction = false,
+): QueryExecutor {
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver is structurally checked in isBunSql
   const unsafeFn = driver["unsafe"] as (
     query: string,
     params?: unknown[],
-  ) => Promise<Record<string, unknown>[] & { count?: number }>;
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- extracting transaction() from Bun SQL driver
+  ) => Promise<
+    Record<string, unknown>[] & { count?: number; affectedRows?: number; command?: string }
+  >;
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver is structurally checked in isBunSql
   const transactionFn = driver["transaction"] as (
     cb: (tx: unknown) => Promise<unknown>,
   ) => Promise<unknown>;
@@ -160,17 +144,33 @@ function createBunSqlExecutor(driver: Record<string, unknown>): QueryExecutor {
     },
     run: async (query, params) => {
       const rows = await unsafeFn(query, params);
-      return { changes: rows.count ?? 0 };
+      let changes = rows.affectedRows ?? rows.count ?? 0;
+
+      // Special treat for GreptimeDB over Postgres wire protocol:
+      // command string might be "OK 1" while count/affectedRows is 0.
+      if (changes === 0 && rows.command !== undefined && rows.command.startsWith("OK ")) {
+        const parsed = parseInt(rows.command.slice(3), 10);
+        if (!isNaN(parsed)) changes = parsed;
+      }
+
+      return { changes };
     },
     transaction: <T>(fn: (executor: QueryExecutor) => Promise<T>) =>
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Promise<unknown> -> Promise<T> at executor boundary
-      transactionFn((tx) => fn(createBunSqlExecutor(tx as Record<string, unknown>))) as Promise<T>,
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- T matches return type of fn
+      transactionFn((tx) =>
+        // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Bun SQL transaction provides a driver-like object
+        fn(createBunSqlExecutor(tx as Record<string, unknown>, true)),
+      ) as Promise<T>,
+    inTransaction,
   };
 }
 
 // pg: uses named queries with a bounded LRU cache for server-side prepared
 // statement reuse. Each unique SQL string gets a stable name (e.g. `q_0`).
-function createPgExecutor(driver: PgClient | PgPool | PgPoolClient): QueryExecutor {
+function createPgExecutor(
+  driver: PgClient | PgPool | PgPoolClient,
+  inTransaction = false,
+): QueryExecutor {
   const cache = new Map<string, string>();
   let statementCount = 0;
 
@@ -203,11 +203,11 @@ function createPgExecutor(driver: PgClient | PgPool | PgPoolClient): QueryExecut
     transaction: async (fn) => {
       const isPool = "connect" in driver && !("release" in driver);
       if (isPool) {
-        // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- narrowed by isPool check above
+        // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver is guaranteed to be PgPool by isPool check
         const client = await (driver as PgPool).connect();
         try {
           await client.query("BEGIN");
-          const res = await fn(createPgExecutor(client));
+          const res = await fn(createPgExecutor(client, true));
           await client.query("COMMIT");
           return res;
         } catch (e) {
@@ -219,7 +219,7 @@ function createPgExecutor(driver: PgClient | PgPool | PgPoolClient): QueryExecut
       }
       await driver.query("BEGIN");
       try {
-        const res = await fn(createPgExecutor(driver));
+        const res = await fn(createPgExecutor(driver, true));
         await driver.query("COMMIT");
         return res;
       } catch (e) {
@@ -227,11 +227,12 @@ function createPgExecutor(driver: PgClient | PgPool | PgPoolClient): QueryExecut
         throw e;
       }
     },
+    inTransaction,
   };
 }
 
 function createPostgresExecutor(driver: PostgresDriver): QueryExecutor {
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- structural duck-typing for Bun SQL
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver is structurally checked in isBunSql
   if (isBunSql(driver)) return createBunSqlExecutor(driver as unknown as Record<string, unknown>);
   if (isPostgresJs(driver)) return createPostgresJsExecutor(driver);
   if (isPg(driver)) return createPgExecutor(driver);
@@ -253,6 +254,11 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
   migrate = () => migrate(this.executor, this.schema, pg);
 
   transaction<T>(fn: (tx: Adapter<S>) => Promise<T>): Promise<T> {
+    if (this.executor.inTransaction) {
+      // Re-use current adapter if already in a transaction. Nested transactions
+      // (SAVEPOINTs) are handled by the executor factories if called directly.
+      return fn(this);
+    }
     return this.executor.transaction((exec) => fn(new PostgresAdapter(this.schema, exec)));
   }
 
