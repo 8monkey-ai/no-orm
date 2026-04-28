@@ -35,12 +35,12 @@ src/
   adapters/
     common.ts           Shared PK, pagination, and value helpers
     memory.ts           MemoryAdapter (LRU-cache-backed)
-    sql.ts              QueryExecutor, SqlFormat interfaces, functional helpers
-    postgres.ts         PostgresAdapter (uses sql.ts helpers)
-    sqlite.ts           SqliteAdapter (uses sql.ts helpers)
+    sql.ts              QueryExecutor interface and toRow helper (shared SQL logic)
+    postgres.ts         PostgresAdapter (Autonomous SQL + Execution)
+    sqlite.ts           SqliteAdapter (Autonomous SQL + Execution)
 ```
 
-Each adapter file is self-contained: formatting hooks, driver detection, executor factories, and adapter class all live together.
+Each adapter file is self-contained: SQL building, driver detection, executor factories, and adapter class all live together.
 
 ## Local Commands
 
@@ -115,19 +115,15 @@ Prefer `for (let i = 0; i < arr.length; i++)` over `for...of` in adapter interna
 
 ### Adapter boundary is the one place where `as T` casts are acceptable
 
-Storage holds `Record<string, unknown>` (RowData) but the adapter interface promises `T`. The cast from `RowData -> T` happens in `applySelect` (memory) and `toRow` (sql). Keep this boundary thin and document it.
+Storage holds `Record<string, unknown>` (RowData) but the adapter interface promises `T`. The cast from `RowData -> T` happens in `applySelect` (memory) and `toRow` (sql adapters). Keep this boundary thin and document it.
 
-### SqlFormat is a plain object, not a class
+### SQL logic is autonomous
 
-Formatting hooks (quoting, placeholders, type mapping, JSON extraction) are defined as stateless configuration objects (`pg`, `sqlite`). Functional helpers in `sql.ts` receive these hooks to generate database-specific SQL.
-
-### SQL logic is functional and composable
-
-Instead of a base class, `sql.ts` provides pure functions (`find`, `create`, `update`, etc.) that orchestrate SQL generation and execution. Each SQL adapter class (`PostgresAdapter`, `SqliteAdapter`) implements the `Adapter` interface by delegating to these helpers. This composition significantly reduces abstraction leaks and improves readability.
+Each SQL adapter class (`PostgresAdapter`, `SqliteAdapter`) implements the `Adapter` interface by owning its SQL generation and execution flow. This significantly reduces abstraction leaks, improves readability, and allows for database-specific optimizations (like `RETURNING` clauses). Shared domain logic (PKs, pagination AST) lives in `common.ts`.
 
 ### QueryExecutor is the driver abstraction
 
-Each database driver (pg Pool, postgres.js, Bun SQL, better-sqlite3, bun:sqlite, async sqlite) gets wrapped into a `QueryExecutor` with uniform `all`/`get`/`run`/`transaction` methods. The executor factory lives in the adapter file next to its formatting hooks.
+Each database driver (pg Pool, postgres.js, Bun SQL, better-sqlite3, bun:sqlite, async sqlite) gets wrapped into a `QueryExecutor` (localized to each adapter) with uniform `all`/`get`/`run`/`transaction` methods. The executor factory lives in the adapter file next to its SQL syntax helpers.
 
 ## Dependency Rules
 
