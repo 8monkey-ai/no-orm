@@ -78,6 +78,30 @@ describe("SqliteAdapter", () => {
       ).toThrow("Primary key updates are not supported.");
     });
 
+    it("should surface unknown write fields as database errors", async () => {
+      try {
+        await adapter.create({
+          model: "users",
+          data: {
+            id: "u1",
+            name: "Alice",
+            age: 30,
+            is_active: true,
+            metadata: null,
+            tags: null,
+            nickname: "Al",
+          } as User & { nickname: string },
+        });
+        expect.unreachable("create should fail for unknown columns");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Error);
+        if (!(error instanceof Error)) {
+          throw error;
+        }
+        expect(error.message).toMatch(/nickname/i);
+      }
+    });
+
     it("should delete a record", async () => {
       await adapter.create({
         model: "users",

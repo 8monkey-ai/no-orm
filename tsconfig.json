@@ -2,7 +2,7 @@
   "compilerOptions": {
     // Environment setup & latest features
     "types": ["bun"],
-    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "lib": ["ES2022"],
     "target": "ES2022",
     "module": "Preserve",
     "moduleDetection": "force",

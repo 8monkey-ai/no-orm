@@ -51,15 +51,13 @@ type User = InferModel<typeof schema.users>;
 import { Database } from "bun:sqlite";
 import { SqliteAdapter } from "@8monkey/no-orm/adapters/sqlite";
 
-const db = new Database(":memory:");
+const db = new Database("data.db");
 const adapter = new SqliteAdapter(schema, db);
 
 await adapter.migrate();
 ```
 
 ### Postgres
-
-Supports `pg`, `postgres.js`, and `Bun.SQL`.
 
 ```ts
 import postgres from "postgres"; // or import { Pool } from "pg"
@@ -73,12 +71,12 @@ await adapter.migrate();
 
 ### Memory
 
-Uses [lru-cache](https://github.com/isaacs/node-lru-cache) for bounded storage with LRU eviction.
+In-memory storage for testing or temporary data.
 
 ```ts
 import { MemoryAdapter } from "@8monkey/no-orm/adapters/memory";
 
-const adapter = new MemoryAdapter(schema, { maxSize: 100 });
+const adapter = new MemoryAdapter(schema, { maxItems: 100 });
 await adapter.migrate();
 ```
 
@@ -86,7 +84,7 @@ await adapter.migrate();
 
 ```ts
 // Create
-const created = await adapter.create<"users", User>({
+const created = await adapter.create({
   model: "users",
   data: {
     id: "u1",
@@ -100,13 +98,13 @@ const created = await adapter.create<"users", User>({
 });
 
 // Find one
-const found = await adapter.find<"users", User>({
+const found = await adapter.find({
   model: "users",
   where: { field: "id", op: "eq", value: "u1" },
 });
 
 // Find many
-const users = await adapter.findMany<"users", User>({
+const users = await adapter.findMany({
   model: "users",
   where: { field: "is_active", op: "eq", value: true },
   sortBy: [{ field: "created_at", direction: "desc" }],
@@ -114,39 +112,39 @@ const users = await adapter.findMany<"users", User>({
 });
 
 // Update one
-const updated = await adapter.update<"users", User>({
+const updated = await adapter.update({
   model: "users",
   where: { field: "id", op: "eq", value: "u1" },
   data: { age: 31 },
 });
 
 // Update many
-const updatedCount = await adapter.updateMany<"users", User>({
+const updatedCount = await adapter.updateMany({
   model: "users",
   where: { field: "is_active", op: "eq", value: true },
   data: { age: 99 },
 });
 
 // Delete one
-await adapter.delete<"users", User>({
+await adapter.delete({
   model: "users",
   where: { field: "id", op: "eq", value: "u1" },
 });
 
 // Delete many
-const deletedCount = await adapter.deleteMany<"users", User>({
+const deletedCount = await adapter.deleteMany({
   model: "users",
   where: { field: "is_active", op: "eq", value: false },
 });
 
 // Count
-const total = await adapter.count<"users", User>({
+const total = await adapter.count({
   model: "users",
   where: { field: "is_active", op: "eq", value: true },
 });
 
 // Upsert - insert or update by primary key
-const user = await adapter.upsert<"users", User>({
+const user = await adapter.upsert({
   model: "users",
   create: { id: "u1", name: "Alice", age: 30, is_active: true, created_at: Date.now() },
   update: { age: 31 },
@@ -184,7 +182,7 @@ where: {
 Filter nested JSON fields using `path`:
 
 ```ts
-const darkUsers = await adapter.findMany<"users", User>({
+const darkUsers = await adapter.findMany({
   model: "users",
   where: {
     field: "metadata",
@@ -199,7 +197,7 @@ const darkUsers = await adapter.findMany<"users", User>({
 
 ```ts
 // Offset pagination
-const page = await adapter.findMany<"users", User>({
+const page = await adapter.findMany({
   model: "users",
   sortBy: [{ field: "created_at", direction: "desc" }],
   limit: 20,
@@ -207,7 +205,7 @@ const page = await adapter.findMany<"users", User>({
 });
 
 // Cursor pagination (keyset)
-const cursorPage = await adapter.findMany<"users", User>({
+const cursorPage = await adapter.findMany({
   model: "users",
   sortBy: [{ field: "created_at", direction: "desc" }],
   limit: 20,
@@ -235,15 +233,6 @@ await adapter.transaction(async (tx) => {
 ```
 
 SQLite and Postgres support nested transactions via savepoints.
-
-## Notes
-
-- `upsert` always conflicts on the Primary Key
-- Optional `where` in `upsert` acts as a predicate -- record is only updated if condition is met
-- Primary-key updates are rejected to keep adapter behavior consistent
-- SQLite stores JSON as text; Postgres stores JSON as `jsonb`
-- `number` and `timestamp` use standard JavaScript `Number`. `bigint` is not supported in v1.
-- Memory adapter uses `lru-cache` (required dependency) with configurable `maxSize` for bounded storage
 
 ## License
 

@@ -1,4 +1,4 @@
-import type { Cursor, Model, SortBy, Where } from "../types";
+import type { Cursor, Model, SortBy, Where } from "../../types";
 
 // --- Schema & Logic Helpers ---
 

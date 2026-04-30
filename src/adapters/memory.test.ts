@@ -648,8 +648,8 @@ describe("MemoryAdapter", () => {
 
   // --- LRU eviction ---
 
-  it("should evict oldest entries when maxSize is exceeded", async () => {
-    const smallAdapter = new MemoryAdapter(schema, { maxSize: 2 });
+  it("should evict oldest entries when maxItems is exceeded", async () => {
+    const smallAdapter = new MemoryAdapter(schema, { maxItems: 2 });
     await smallAdapter.migrate();
 
     await smallAdapter.create({

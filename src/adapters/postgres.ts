@@ -18,20 +18,33 @@ import {
   getIdentityValues,
   getPaginationFilter,
   getPrimaryKeyFields,
-} from "./common";
-import { type QueryExecutor, isQueryExecutor, toRow } from "./sql";
+} from "./utils/common";
+import {
+  type QueryExecutor,
+  isQueryExecutor,
+  toRow,
+  toDbRow,
+  type Fragment,
+  type QuotedSchema,
+  createQuotedSchema,
+  join,
+  wrap,
+} from "./utils/sql";
 
 type PostgresJsSql = postgres.Sql;
 type TransactionSql = postgres.TransactionSql;
 
 export type PostgresDriver = PgClient | PgPool | PgPoolClient | PostgresJsSql | TransactionSql;
 
-const MAX_CACHE_SIZE = 100;
+/**
+ * Limits the number of prepared statement objects kept in memory to prevent leaks
+ * while allowing statement reuse for performance.
+ */
+const MAX_CACHED_STATEMENTS = 100;
 
 // --- Internal PG Syntax Helpers ---
 
 const quote = (s: string) => `"${s.replaceAll('"', '""')}"`;
-const placeholder = (i: number) => `$${i + 1}`;
 
 function mapFieldType(field: Field): string {
   switch (field.type) {
@@ -51,92 +64,99 @@ function mapFieldType(field: Field): string {
   }
 }
 
-function jsonExtract(
-  column: string,
-  path: string[],
-  isNumeric?: boolean,
-  isBoolean?: boolean,
-): string {
-  let segments = "";
-  for (let i = 0; i < path.length; i++) {
-    if (i > 0) segments += ", ";
-    segments += `'${path[i]!.replaceAll("'", "''")}'`;
-  }
-  const base = `jsonb_extract_path_text(${column}, ${segments})`;
-  if (isNumeric === true) return `(${base})::double precision`;
-  if (isBoolean === true) return `(${base})::boolean`;
-  return base;
-}
-
-function toColumnExpr(model: Model, fieldName: string, path?: string[], value?: unknown): string {
-  if (!path || path.length === 0) return quote(fieldName);
+function toColumnExpr(
+  model: Model,
+  fieldName: string,
+  path?: string[],
+  value?: unknown,
+  quoteFn: (s: string) => string = quote,
+): Fragment {
+  const quoted = quoteFn(fieldName);
+  if (!path || path.length === 0) return { strings: [quoted], params: [] };
   const field = model.fields[fieldName];
   if (field?.type !== "json" && field?.type !== "json[]") {
     throw new Error(`Cannot use JSON path on non-JSON field: ${fieldName}`);
   }
-  return jsonExtract(quote(fieldName), path, typeof value === "number", typeof value === "boolean");
+
+  const isNumeric = typeof value === "number";
+  const isBoolean = typeof value === "boolean";
+
+  const strings = [
+    `jsonb_extract_path_text(${quoted}, `,
+    // eslint-disable-next-line unicorn/no-new-array -- creating array of specific length for placeholders
+    ...new Array<string>(path.length - 1).fill(", "),
+    ")",
+  ];
+  if (isNumeric) {
+    strings[0] = "(" + strings[0]!;
+    strings[strings.length - 1] += ")::double precision";
+  } else if (isBoolean) {
+    strings[0] = "(" + strings[0]!;
+    strings[strings.length - 1] += ")::boolean";
+  }
+  return { strings, params: path };
 }
 
 function toWhereRecursive(
   model: Model,
   where: Where,
-  startIndex: number,
-): { sql: string; params: unknown[] } {
+  quoteFn: (s: string) => string = quote,
+): Fragment {
   if ("and" in where) {
-    const parts = [];
-    const params = [];
-    let currentIdx = startIndex;
+    const parts: Fragment[] = [];
     for (let i = 0; i < where.and.length; i++) {
-      const built = toWhereRecursive(model, where.and[i]!, currentIdx);
-      parts.push(`(${built.sql})`);
-      for (let j = 0; j < built.params.length; j++) params.push(built.params[j]);
-      currentIdx += built.params.length;
+      parts.push(wrap(toWhereRecursive(model, where.and[i]!, quoteFn), "(", ")"));
     }
-    return { sql: parts.join(" AND "), params };
+    return join(parts, " AND ");
   }
 
   if ("or" in where) {
-    const parts = [];
-    const params = [];
-    let currentIdx = startIndex;
+    const parts: Fragment[] = [];
     for (let i = 0; i < where.or.length; i++) {
-      const built = toWhereRecursive(model, where.or[i]!, currentIdx);
-      parts.push(`(${built.sql})`);
-      for (let j = 0; j < built.params.length; j++) params.push(built.params[j]);
-      currentIdx += built.params.length;
+      parts.push(wrap(toWhereRecursive(model, where.or[i]!, quoteFn), "(", ")"));
     }
-    return { sql: parts.join(" OR "), params };
+    return join(parts, " OR ");
   }
 
-  const expr = toColumnExpr(model, where.field, where.path, where.value);
+  const expr = toColumnExpr(model, where.field, where.path, where.value, quoteFn);
   const val = where.value;
 
   switch (where.op) {
     case "eq":
-      if (val === null) return { sql: `${expr} IS NULL`, params: [] };
-      return { sql: `${expr} = ${placeholder(startIndex)}`, params: [val] };
+      if (val === null) return wrap(expr, "", " IS NULL");
+      return join([expr, { strings: [" = ", ""], params: [val] }], "");
     case "ne":
-      if (val === null) return { sql: `${expr} IS NOT NULL`, params: [] };
-      return { sql: `${expr} != ${placeholder(startIndex)}`, params: [val] };
+      if (val === null) return wrap(expr, "", " IS NOT NULL");
+      return join([expr, { strings: [" != ", ""], params: [val] }], "");
     case "gt":
-      return { sql: `${expr} > ${placeholder(startIndex)}`, params: [val] };
+      return join([expr, { strings: [" > ", ""], params: [val] }], "");
     case "gte":
-      return { sql: `${expr} >= ${placeholder(startIndex)}`, params: [val] };
+      return join([expr, { strings: [" >= ", ""], params: [val] }], "");
     case "lt":
-      return { sql: `${expr} < ${placeholder(startIndex)}`, params: [val] };
+      return join([expr, { strings: [" < ", ""], params: [val] }], "");
     case "lte":
-      return { sql: `${expr} <= ${placeholder(startIndex)}`, params: [val] };
+      return join([expr, { strings: [" <= ", ""], params: [val] }], "");
     case "in": {
-      if (!Array.isArray(val) || val.length === 0) return { sql: "1=0", params: [] };
-      const phs = [];
-      for (let i = 0; i < val.length; i++) phs.push(placeholder(startIndex + i));
-      return { sql: `${expr} IN (${phs.join(", ")})`, params: val };
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val cast to unknown array for in operator
+      const vArr = val as unknown[];
+      if (!Array.isArray(vArr) || vArr.length === 0) return { strings: ["1=0"], params: [] };
+      const inFrag: Fragment = {
+        // eslint-disable-next-line unicorn/no-new-array -- creating array of specific length for placeholders
+        strings: [" IN (", ...new Array<string>(vArr.length - 1).fill(", "), ")"],
+        params: vArr,
+      };
+      return join([expr, inFrag], "");
     }
     case "not_in": {
-      if (!Array.isArray(val) || val.length === 0) return { sql: "1=1", params: [] };
-      const phs = [];
-      for (let i = 0; i < val.length; i++) phs.push(placeholder(startIndex + i));
-      return { sql: `${expr} NOT IN (${phs.join(", ")})`, params: val };
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val cast to unknown array for not_in operator
+      const vArr = val as unknown[];
+      if (!Array.isArray(vArr) || vArr.length === 0) return { strings: ["1=1"], params: [] };
+      const inFrag: Fragment = {
+        // eslint-disable-next-line unicorn/no-new-array -- creating array of specific length for placeholders
+        strings: [" NOT IN (", ...new Array<string>(vArr.length - 1).fill(", "), ")"],
+        params: vArr,
+      };
+      return join([expr, inFrag], "");
     }
     default:
       throw new Error(`Unsupported operator: ${String((where as Record<string, unknown>)["op"])}`);
@@ -148,61 +168,25 @@ function toWhere(
   where?: Where,
   cursor?: Cursor,
   sortBy?: SortBy[],
-  startIndex = 0,
-): { sql: string; params: unknown[] } {
-  const parts: string[] = [];
-  const params: unknown[] = [];
-  let nextIndex = startIndex;
+  quoteFn: (s: string) => string = quote,
+): Fragment {
+  const parts: Fragment[] = [];
 
   if (where) {
-    const built = toWhereRecursive(model, where, nextIndex);
-    parts.push(`(${built.sql})`);
-    for (let i = 0; i < built.params.length; i++) params.push(built.params[i]);
-    nextIndex += built.params.length;
+    parts.push(wrap(toWhereRecursive(model, where, quoteFn), "(", ")"));
   }
 
   if (cursor) {
     const paginationWhere = getPaginationFilter(cursor, sortBy);
     if (paginationWhere) {
-      const built = toWhereRecursive(model, paginationWhere, nextIndex);
-      parts.push(`(${built.sql})`);
-      for (let i = 0; i < built.params.length; i++) params.push(built.params[i]);
-      nextIndex += built.params.length;
+      parts.push(wrap(toWhereRecursive(model, paginationWhere, quoteFn), "(", ")"));
     }
   }
 
-  return { sql: parts.length > 0 ? parts.join(" AND ") : "1=1", params };
-}
-
-function toInput(
-  fields: Record<string, Field>,
-  data: Record<string, unknown>,
-): Record<string, unknown> {
-  const res: Record<string, unknown> = {};
-  const keys = Object.keys(data);
-  for (let i = 0; i < keys.length; i++) {
-    const k = keys[i]!;
-    const val = data[k];
-    const spec = fields[k];
-    if (val === undefined) continue;
-    if (val === null) {
-      res[k] = null;
-      continue;
-    }
-    if (spec?.type === "json" || spec?.type === "json[]") {
-      res[k] = JSON.stringify(val);
-    } else {
-      res[k] = val;
-    }
-  }
-  return res;
+  return parts.length > 0 ? join(parts, " AND ") : { strings: ["1=1"], params: [] };
 }
 
 // --- Driver detection ---
-// Bun SQL: has `unsafe` + `transaction` (and `begin`).
-// postgres.js: has `unsafe` + `begin`, but NOT `transaction`.
-// pg: has `query`.
-// Order matters: check Bun SQL first (most specific), then postgres.js, then pg.
 
 function isBunSql(driver: PostgresDriver): boolean {
   return "unsafe" in driver && "transaction" in driver;
@@ -218,33 +202,39 @@ function isPg(driver: PostgresDriver): driver is PgClient | PgPool | PgPoolClien
 
 // --- Executor factories ---
 
-// postgres.js: uses `sql.unsafe(query, params, { prepare: true })` for server-side
-// prepared statements. The driver manages statement name caching internally.
-// Works for both Sql (top-level) and TransactionSql (inside begin/savepoint) since
-// both extend ISql which provides `unsafe()`.
 function createPostgresJsExecutor(
   sql: postgres.Sql | postgres.TransactionSql,
   inTransaction = false,
 ): QueryExecutor {
-  const run = (query: string, params?: unknown[]) =>
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- postgres.js params type is a stricter version of unknown[]
-    sql.unsafe(query, params as postgres.ParameterOrJSON<never>[], { prepare: true });
+  const runQuery = (query: Fragment) => {
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- constructing TemplateStringsArray for driver call
+    const strings = query.strings as string[] & { raw: string[] };
+    strings.raw = query.strings;
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion, typescript-eslint/no-unsafe-return -- calling driver as tagged template function to avoid .unsafe()
+    const run = sql as (
+      strings: TemplateStringsArray,
+      ...params: unknown[]
+    ) => Promise<Record<string, unknown>[]>;
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- TemplateStringsArray is required by the driver's tagged template signature
+    return run(strings as unknown as TemplateStringsArray, ...query.params);
+  };
 
   return {
-    all: async (query, params) => {
-      const rows = await run(query, params);
-      return rows as Record<string, unknown>[];
+    all: (query) => {
+      return runQuery(query);
     },
-    get: async (query, params) => {
-      const rows = await run(query, params);
-      return rows[0] as Record<string, unknown> | undefined;
+    get: async (query) => {
+      const rows = await runQuery(query);
+      return rows[0];
     },
-    run: async (query, params) => {
-      const rows = await run(query, params);
-      return { changes: rows.count ?? 0 };
+    run: async (query) => {
+      // eslint-disable-next-line typescript-eslint/no-unsafe-assignment -- driver returns result with count/affectedRows
+      const rows = await runQuery(query);
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- postgres.js returns result with .count
+      const r = rows as unknown as { count?: number };
+      return { changes: r.count ?? 0 };
     },
     transaction: <T>(fn: (executor: QueryExecutor) => Promise<T>) => {
-      // Top-level Sql uses begin(); TransactionSql uses savepoint() for nesting
       if ("begin" in sql) {
         // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- T matches return type of fn
         return sql.begin((tx) => fn(createPostgresJsExecutor(tx, true))) as Promise<T>;
@@ -256,54 +246,50 @@ function createPostgresJsExecutor(
   };
 }
 
-// Bun SQL: uses `sql.unsafe(query, params)`. No prepare option — the driver
-// manages prepared statements internally.
 function createBunSqlExecutor(
   driver: Record<string, unknown>,
   inTransaction = false,
 ): QueryExecutor {
+  // Bun SQL driver is a callable function that also has a .transaction() method
   // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver is structurally checked in isBunSql
-  const unsafeFn = driver["unsafe"] as (
-    query: string,
-    params?: unknown[],
-  ) => Promise<
-    Record<string, unknown>[] & { count?: number; affectedRows?: number; command?: string }
-  >;
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver is structurally checked in isBunSql
-  const transactionFn = driver["transaction"] as (
-    cb: (tx: unknown) => Promise<unknown>,
-  ) => Promise<unknown>;
+  const bunSql = driver as unknown as ((
+    strings: TemplateStringsArray,
+    ...params: unknown[]
+  ) => Promise<Record<string, unknown>[]>) & {
+    transaction: <T>(fn: (tx: Record<string, unknown>) => Promise<T>) => Promise<T>;
+  };
+
+  const runQuery = (query: Fragment) => {
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- constructing TemplateStringsArray for driver call
+    const strings = query.strings as string[] & { raw: string[] };
+    strings.raw = query.strings;
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver call expects TemplateStringsArray
+    return bunSql(strings as unknown as TemplateStringsArray, ...query.params);
+  };
 
   return {
-    all: (query, params) => unsafeFn(query, params),
-    get: async (query, params) => {
-      const rows = await unsafeFn(query, params);
+    all: (query) => runQuery(query),
+    get: async (query) => {
+      const rows = await runQuery(query);
       return rows[0];
     },
-    run: async (query, params) => {
-      const rows = await unsafeFn(query, params);
-      let changes = rows.affectedRows ?? rows.count ?? 0;
-
-      // Special treat for GreptimeDB over Postgres wire protocol:
-      // command string might be "OK 1" while count/affectedRows is 0.
-      if (changes === 0 && rows.command !== undefined && rows.command.startsWith("OK ")) {
-        const parsed = parseInt(rows.command.slice(3), 10);
+    run: async (query) => {
+      const rows = await runQuery(query);
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver result has count/affectedRows/command
+      const r = rows as unknown as { affectedRows?: number; count?: number; command?: string };
+      let changes = r.affectedRows ?? r.count ?? 0;
+      if (changes === 0 && r.command !== undefined && r.command.startsWith("OK ")) {
+        const parsed = parseInt(r.command.slice(3), 10);
         if (!isNaN(parsed)) changes = parsed;
       }
       return { changes };
     },
     transaction: <T>(fn: (executor: QueryExecutor) => Promise<T>) =>
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- T matches return type of fn
-      transactionFn((tx) =>
-        // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Bun SQL transaction provides a driver-like object
-        fn(createBunSqlExecutor(tx as Record<string, unknown>, true)),
-      ) as Promise<T>,
+      bunSql.transaction((tx) => fn(createBunSqlExecutor(tx, true))),
     inTransaction,
   };
 }
 
-// pg: uses named queries with a bounded LRU cache for server-side prepared
-// statement reuse. Each unique SQL string gets a stable name (e.g. `q_0`).
 function createPgExecutor(
   driver: PgClient | PgPool | PgPoolClient,
   inTransaction = false,
@@ -311,30 +297,37 @@ function createPgExecutor(
   const cache = new Map<string, string>();
   let statementCount = 0;
 
-  function getQuery(sql: string, values?: unknown[]) {
-    let name = cache.get(sql);
+  function getQuery(query: Fragment) {
+    // pg needs a single string with $1, $2 placeholders
+    const text = query.strings.reduce(
+      (acc, s, i) => acc + s + (i < query.params.length ? "$" + (i + 1) : ""),
+      "",
+    );
+    const values = query.params;
+
+    let name = cache.get(text);
     if (name === undefined) {
-      if (cache.size >= MAX_CACHE_SIZE) {
+      if (cache.size >= MAX_CACHED_STATEMENTS) {
         const first = cache.keys().next();
         if (first.done !== true) cache.delete(first.value);
       }
       name = `q_${statementCount++}`;
-      cache.set(sql, name);
+      cache.set(text, name);
     }
-    return { name, text: sql, values };
+    return { name, text, values };
   }
 
   return {
-    all: async (sql, params) => {
-      const res = await driver.query<Record<string, unknown>>(getQuery(sql, params));
+    all: async (q) => {
+      const res = await driver.query<Record<string, unknown>>(getQuery(q));
       return res.rows;
     },
-    get: async (sql, params) => {
-      const res = await driver.query<Record<string, unknown>>(getQuery(sql, params));
+    get: async (q) => {
+      const res = await driver.query<Record<string, unknown>>(getQuery(q));
       return res.rows[0];
     },
-    run: async (sql, params) => {
-      const res = await driver.query(getQuery(sql, params));
+    run: async (q) => {
+      const res = await driver.query(getQuery(q));
       return { changes: res.rowCount ?? 0 };
     },
     transaction: async (fn) => {
@@ -378,14 +371,36 @@ function createPostgresExecutor(driver: PostgresDriver): QueryExecutor {
 
 // --- Adapter ---
 
+/**
+ * Postgres Adapter for no-orm.
+ *
+ * Notes:
+ * - Sequential DDL: Create tables first, then indexes.
+ * - SQLite stores JSON as text; Postgres stores JSON as jsonb.
+ * - Driver support: node-postgres (pg), postgres.js, and Bun.SQL.
+ * - upsert always conflicts on the Primary Key.
+ * - Optional where in upsert acts as a predicate -- record is only updated if condition is met.
+ * - Primary-key updates are rejected to keep adapter behavior consistent.
+ * - number and timestamp use standard JavaScript Number. bigint is not supported in v1.
+ */
 export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
   private executor: QueryExecutor;
 
   constructor(
     private schema: S,
     driver: PostgresDriver | QueryExecutor,
+    private quoted: QuotedSchema = createQuotedSchema(schema, quote),
   ) {
     this.executor = isQueryExecutor(driver) ? driver : createPostgresExecutor(driver);
+  }
+
+  private getQuotedModel(name: keyof S): string {
+    const key = String(name);
+    return this.quoted.models[key] ?? quote(key);
+  }
+
+  private getQuotedField(model: keyof S, field: string): string {
+    return this.quoted.fields[String(model)]?.[field] ?? quote(field);
   }
 
   async migrate(): Promise<void> {
@@ -396,18 +411,22 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
     for (let i = 0; i < models.length; i++) {
       const [name, model] = models[i]!;
       const fields = Object.entries(model.fields);
-      const columns: string[] = [];
+      const columnParts: string[] = [];
       for (let j = 0; j < fields.length; j++) {
         const [fieldName, field] = fields[j]!;
+        const type = mapFieldType(field);
         const nullable = field.nullable === true ? "" : " NOT NULL";
-        columns.push(`${quote(fieldName)} ${mapFieldType(field)}${nullable}`);
+        columnParts.push(`${this.getQuotedField(name as keyof S, fieldName)} ${type}${nullable}`);
       }
       const pkFields = getPrimaryKeyFields(model);
-      const pk = `PRIMARY KEY (${pkFields.map((f) => quote(f)).join(", ")})`;
+      const pk = `PRIMARY KEY (${pkFields.map((f) => this.getQuotedField(name as keyof S, f)).join(", ")})`;
       // eslint-disable-next-line no-await-in-loop -- DDL is intentionally sequential
-      await this.executor.run(
-        `CREATE TABLE IF NOT EXISTS ${quote(name)} (${columns.join(", ")}, ${pk})`,
-      );
+      await this.executor.run({
+        strings: [
+          `CREATE TABLE IF NOT EXISTS ${this.getQuotedModel(name as keyof S)} (${columnParts.join(", ")}, ${pk})`,
+        ],
+        params: [],
+      });
     }
 
     // Now create indexes
@@ -418,19 +437,25 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
         const idx = model.indexes[j]!;
         const fields = Array.isArray(idx.field) ? idx.field : [idx.field];
         const formatted = fields.map(
-          (f) => `${quote(f)}${idx.order ? ` ${idx.order.toUpperCase()}` : ""}`,
+          (f) =>
+            `${this.getQuotedField(name as keyof S, f)}${idx.order ? ` ${idx.order.toUpperCase()}` : ""}`,
         );
         // eslint-disable-next-line no-await-in-loop -- DDL is intentionally sequential
-        await this.executor.run(
-          `CREATE INDEX IF NOT EXISTS ${quote(`idx_${name}_${j}`)} ON ${quote(name)} (${formatted.join(", ")})`,
-        );
+        await this.executor.run({
+          strings: [
+            `CREATE INDEX IF NOT EXISTS ${quote(`idx_${name}_${j}`)} ON ${this.getQuotedModel(name as keyof S)} (${formatted.join(", ")})`,
+          ],
+          params: [],
+        });
       }
     }
   }
 
   transaction<T>(fn: (tx: Adapter<S>) => Promise<T>): Promise<T> {
     if (this.executor.inTransaction) return fn(this);
-    return this.executor.transaction((exec) => fn(new PostgresAdapter(this.schema, exec)));
+    return this.executor.transaction((exec) =>
+      fn(new PostgresAdapter(this.schema, exec, this.quoted)),
+    );
   }
 
   async create<
@@ -439,16 +464,19 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
   >(args: { model: K; data: T; select?: Select<T> }): Promise<T> {
     const { model: modelName, data, select } = args;
     const model = this.schema[modelName]!;
-    const input = toInput(model.fields, data);
+    const input = toDbRow(model, data);
     const fields = Object.keys(input);
-    const sqlFields = fields.map((f) => quote(f)).join(", ");
-    const sqlValues = fields.map((_, i) => placeholder(i)).join(", ");
-    const sqlSelect = select ? select.map((s) => quote(s)).join(", ") : "*";
-    const sql = `INSERT INTO ${quote(modelName)} (${sqlFields}) VALUES (${sqlValues}) RETURNING ${sqlSelect}`;
-    const row = await this.executor.get(
-      sql,
-      fields.map((f) => input[f]),
-    );
+    const sqlFields = fields.map((f) => this.getQuotedField(modelName, f)).join(", ");
+    const sqlSelect = select
+      ? select.map((s) => this.getQuotedField(modelName, s as string)).join(", ")
+      : "*";
+
+    const strings = [`INSERT INTO ${this.getQuotedModel(modelName)} (${sqlFields}) VALUES (`];
+    for (let i = 1; i < fields.length; i++) strings.push(", ");
+    strings.push(`) RETURNING ${sqlSelect}`);
+    const params = fields.map((f) => input[f]);
+
+    const row = await this.executor.get({ strings, params });
     if (row === undefined || row === null) throw new Error("Failed to insert record");
     // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- mapped fields match the shape of T
     return toRow<T>(model, row, select as Select<Record<string, unknown>>);
@@ -460,10 +488,20 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
   >(args: { model: K; where: Where<T>; select?: Select<T> }): Promise<T | null> {
     const { model: modelName, where, select } = args;
     const model = this.schema[modelName]!;
-    const built = toWhere(model, where as Where);
-    const sqlSelect = select ? select.map((s) => quote(s)).join(", ") : "*";
-    const sql = `SELECT ${sqlSelect} FROM ${quote(modelName)} WHERE ${built.sql} LIMIT 1`;
-    const row = await this.executor.get(sql, built.params);
+    const quoter = (f: string) => this.getQuotedField(modelName, f);
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where matches model fields
+    const built = toWhere(model, where as Where, undefined, undefined, quoter);
+    const sqlSelect = select
+      ? select.map((s) => this.getQuotedField(modelName, s as string)).join(", ")
+      : "*";
+
+    const query = wrap(
+      built,
+      `SELECT ${sqlSelect} FROM ${this.getQuotedModel(modelName)} WHERE `,
+      " LIMIT 1",
+    );
+
+    const row = await this.executor.get(query);
     if (row === undefined || row === null) return null;
     // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- select matches model fields at runtime
     return toRow<T>(model, row, select as Select<Record<string, unknown>>);
@@ -483,26 +521,47 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
   }): Promise<T[]> {
     const { model: modelName, where, select, sortBy, limit, offset, cursor } = args;
     const model = this.schema[modelName]!;
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where/Cursor/SortBy types match at runtime
-    const built = toWhere(model, where as Where, cursor as Cursor, sortBy as SortBy[]);
-    const sqlSelect = select ? select.map((s) => quote(s)).join(", ") : "*";
-    let sql = `SELECT ${sqlSelect} FROM ${quote(modelName)} WHERE ${built.sql}`;
+    const quoter = (f: string) => this.getQuotedField(modelName, f);
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- input parameters match where/cursor/sortBy shapes
+    const built = toWhere(model, where as Where, cursor as Cursor, sortBy as SortBy[], quoter);
+    const sqlSelect = select
+      ? select.map((s) => this.getQuotedField(modelName, s as string)).join(", ")
+      : "*";
+
+    const query = wrap(
+      built,
+      `SELECT ${sqlSelect} FROM ${this.getQuotedModel(modelName)} WHERE `,
+      "",
+    );
 
     if (sortBy && sortBy.length > 0) {
-      const parts = sortBy.map(
-        (s) => `${toColumnExpr(model, s.field, s.path)} ${(s.direction ?? "asc").toUpperCase()}`,
-      );
-      sql += ` ORDER BY ${parts.join(", ")}`;
+      query.strings[query.strings.length - 1] += " ORDER BY ";
+      for (let i = 0; i < sortBy.length; i++) {
+        const s = sortBy[i]!;
+        const expr = toColumnExpr(model, s.field, s.path, undefined, quoter);
+        const dir = (s.direction ?? "asc").toUpperCase();
+        if (i > 0) query.strings[query.strings.length - 1] += ", ";
+        query.strings[query.strings.length - 1] += expr.strings[0]!;
+        for (let j = 1; j < expr.strings.length; j++) {
+          query.strings.push(expr.strings[j]!);
+        }
+        for (let j = 0; j < expr.params.length; j++) {
+          query.params.push(expr.params[j]);
+        }
+        query.strings[query.strings.length - 1] += ` ${dir}`;
+      }
     }
     if (limit !== undefined) {
-      sql += ` LIMIT ${placeholder(built.params.length)}`;
-      built.params.push(limit);
+      query.strings[query.strings.length - 1] += " LIMIT ";
+      query.strings.push("");
+      query.params.push(limit);
     }
     if (offset !== undefined) {
-      sql += ` OFFSET ${placeholder(built.params.length)}`;
-      built.params.push(offset);
+      query.strings[query.strings.length - 1] += " OFFSET ";
+      query.strings.push("");
+      query.params.push(offset);
     }
-    const rows = await this.executor.all(sql, built.params);
+    const rows = await this.executor.all(query);
 
     const result: T[] = [];
     for (let i = 0; i < rows.length; i++) {
@@ -515,20 +574,36 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
   async update<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
-  >(args: { model: K; where: Where<T>; data: Partial<T> }): Promise<T | null> {
-    const { model: modelName, where, data } = args;
+  >(args: { model: K; data: Partial<T>; where: Where<T>; select?: Select<T> }): Promise<T | null> {
+    const { model: modelName, data, where } = args;
     const model = this.schema[modelName]!;
     assertNoPrimaryKeyUpdates(model, data);
-    const input = toInput(model.fields, data);
+    const input = toDbRow(model, data);
     const fields = Object.keys(input);
+
     if (fields.length === 0) return this.find({ model: modelName, where, select: undefined });
 
-    const assignments = fields.map((f, i) => `${quote(f)} = ${placeholder(i)}`);
+    const setParts: Fragment[] = [];
+    for (let i = 0; i < fields.length; i++) {
+      const f = fields[i]!;
+      setParts.push({
+        strings: [`${this.getQuotedField(modelName, f)} = `, ""],
+        params: [input[f]],
+      });
+    }
+    const setFrag = join(setParts, ", ");
+
+    const quoter = (f: string) => this.getQuotedField(modelName, f);
     // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where matches at runtime
-    const built = toWhere(model, where as Where, undefined, undefined, fields.length);
-    const sql = `UPDATE ${quote(modelName)} SET ${assignments.join(", ")} WHERE ${built.sql} RETURNING *`;
-    const row = await this.executor.get(sql, [...fields.map((f) => input[f]), ...built.params]);
-    if (row === undefined || row === null) return null;
+    const whereFrag = toWhere(model, where as Where, undefined, undefined, quoter);
+    const query = join(
+      [wrap(setFrag, `UPDATE ${this.getQuotedModel(modelName)} SET `, ""), whereFrag],
+      " WHERE ",
+    );
+    query.strings[query.strings.length - 1] += " RETURNING *";
+
+    const row = await this.executor.get(query);
+    if (row === undefined || row === null) return this.find({ model: modelName, where });
     // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- mapped fields match the shape of T
     return toRow<T>(model, row);
   }
@@ -540,15 +615,29 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
     const { model: modelName, where, data } = args;
     const model = this.schema[modelName]!;
     assertNoPrimaryKeyUpdates(model, data);
-    const input = toInput(model.fields, data);
+    const input = toDbRow(model, data);
     const fields = Object.keys(input);
     if (fields.length === 0) return 0;
 
-    const assignments = fields.map((f, i) => `${quote(f)} = ${placeholder(i)}`);
+    const setParts: Fragment[] = [];
+    for (let i = 0; i < fields.length; i++) {
+      const f = fields[i]!;
+      setParts.push({
+        strings: [`${this.getQuotedField(modelName, f)} = `, ""],
+        params: [input[f]],
+      });
+    }
+    const setFrag = join(setParts, ", ");
+
+    const quoter = (f: string) => this.getQuotedField(modelName, f);
     // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where matches at runtime
-    const built = toWhere(model, where as Where, undefined, undefined, fields.length);
-    const sql = `UPDATE ${quote(modelName)} SET ${assignments.join(", ")} WHERE ${built.sql}`;
-    const res = await this.executor.run(sql, [...fields.map((f) => input[f]), ...built.params]);
+    const whereFrag = toWhere(model, where as Where, undefined, undefined, quoter);
+    const query = join(
+      [wrap(setFrag, `UPDATE ${this.getQuotedModel(modelName)} SET `, ""), whereFrag],
+      " WHERE ",
+    );
+
+    const res = await this.executor.run(query);
     return res.changes;
   }
 
@@ -566,36 +655,56 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
     const model = this.schema[modelName]!;
     assertNoPrimaryKeyUpdates(model, uData);
 
-    const cInput = toInput(model.fields, cData);
-    const cFields = Object.keys(cInput);
-    const uInput = toInput(model.fields, uData);
-    const uFields = Object.keys(uInput);
+    const insertRow = toDbRow(model, cData);
+    const cFields = Object.keys(insertRow);
+    const updateRow = toDbRow(model, uData);
+    const uFields = Object.keys(updateRow);
     const pkFields = getPrimaryKeyFields(model);
 
-    const sqlColumns = cFields.map((f) => quote(f)).join(", ");
-    const sqlPlaceholders = cFields.map((_, i) => placeholder(i)).join(", ");
-    const sqlConflict = pkFields.map((f) => quote(f)).join(", ");
-    const sqlSelect = select ? select.map((s) => quote(s)).join(", ") : "*";
+    const sqlFields = cFields.map((f) => this.getQuotedField(modelName, f)).join(", ");
+    const sqlConflict = pkFields.map((f) => this.getQuotedField(modelName, f)).join(", ");
 
-    let sql = `INSERT INTO ${quote(modelName)} (${sqlColumns}) VALUES (${sqlPlaceholders}) ON CONFLICT (${sqlConflict}) `;
-    const params = cFields.map((f) => cInput[f]);
+    let query: Fragment = {
+      strings: [`INSERT INTO ${this.getQuotedModel(modelName)} (${sqlFields}) VALUES (`],
+      params: [],
+    };
+    for (let i = 0; i < cFields.length; i++) {
+      if (i > 0) query.strings[query.strings.length - 1] += ", ";
+      query.params.push(insertRow[cFields[i]!]);
+      query.strings.push("");
+    }
+    query.strings[query.strings.length - 1] += `) ON CONFLICT (${sqlConflict}) `;
 
     if (uFields.length > 0) {
-      const assignments = uFields.map((f, i) => `${quote(f)} = ${placeholder(cFields.length + i)}`);
-      params.push(...uFields.map((f) => uInput[f]));
-      sql += `DO UPDATE SET ${assignments.join(", ")}`;
+      const setParts: Fragment[] = [];
+      for (let i = 0; i < uFields.length; i++) {
+        const f = uFields[i]!;
+        setParts.push({
+          strings: [`${this.getQuotedField(modelName, f)} = `, ""],
+          params: [updateRow[f]],
+        });
+      }
+      const setFrag = join(setParts, ", ");
+      query.strings[query.strings.length - 1] += "DO UPDATE SET ";
+      query = join([query, setFrag], "");
+
       if (where) {
+        const quoter = (f: string) => this.getQuotedField(modelName, f);
         // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where matches at runtime
-        const built = toWhere(model, where as Where, undefined, undefined, params.length);
-        sql += ` WHERE ${built.sql}`;
-        params.push(...built.params);
+        const built = toWhere(model, where as Where, undefined, undefined, quoter);
+        query.strings[query.strings.length - 1] += " WHERE ";
+        query = join([query, built], "");
       }
     } else {
-      sql += "DO NOTHING";
+      query.strings[query.strings.length - 1] += "DO NOTHING";
     }
 
-    sql += ` RETURNING ${sqlSelect}`;
-    const row = await this.executor.get(sql, params);
+    const sqlSelect = select
+      ? select.map((s) => this.getQuotedField(modelName, s as string)).join(", ")
+      : "*";
+    query.strings[query.strings.length - 1] += ` RETURNING ${sqlSelect}`;
+
+    const row = await this.executor.get(query);
     if (row !== undefined && row !== null) {
       // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- select matches model fields at runtime
       return toRow<T>(model, row, select as Select<Record<string, unknown>>);
@@ -603,7 +712,7 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
 
     const existing = await this.find({
       model: modelName,
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- PK filter matches T
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- identity filter matches T
       where: buildIdentityFilter(model, getIdentityValues(model, cData)) as Where<T>,
       select,
     });
@@ -617,9 +726,11 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
   >(args: { model: K; where: Where<T> }): Promise<void> {
     const { model: modelName, where } = args;
     const model = this.schema[modelName]!;
+    const quoter = (f: string) => this.getQuotedField(modelName, f);
     // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where matches at runtime
-    const built = toWhere(model, where as Where);
-    await this.executor.run(`DELETE FROM ${quote(modelName)} WHERE ${built.sql}`, built.params);
+    const built = toWhere(model, where as Where, undefined, undefined, quoter);
+    const query = wrap(built, `DELETE FROM ${this.getQuotedModel(modelName)} WHERE `, "");
+    await this.executor.run(query);
   }
 
   async deleteMany<
@@ -628,12 +739,11 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
   >(args: { model: K; where?: Where<T> }): Promise<number> {
     const { model: modelName, where } = args;
     const model = this.schema[modelName]!;
+    const quoter = (f: string) => this.getQuotedField(modelName, f);
     // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where matches at runtime
-    const built = toWhere(model, where as Where);
-    const res = await this.executor.run(
-      `DELETE FROM ${quote(modelName)} WHERE ${built.sql}`,
-      built.params,
-    );
+    const built = toWhere(model, where as Where, undefined, undefined, quoter);
+    const query = wrap(built, `DELETE FROM ${this.getQuotedModel(modelName)} WHERE `, "");
+    const res = await this.executor.run(query);
     return res.changes;
   }
 
@@ -643,12 +753,16 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
   >(args: { model: K; where?: Where<T> }): Promise<number> {
     const { model: modelName, where } = args;
     const model = this.schema[modelName]!;
+    const quoter = (f: string) => this.getQuotedField(modelName, f);
     // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where matches at runtime
-    const built = toWhere(model, where as Where);
-    const row = await this.executor.get(
-      `SELECT COUNT(*) as count FROM ${quote(modelName)} WHERE ${built.sql}`,
-      built.params,
+    const built = toWhere(model, where as Where, undefined, undefined, quoter);
+    const query = wrap(
+      built,
+      `SELECT COUNT(*) as count FROM ${this.getQuotedModel(modelName)} WHERE `,
+      "",
     );
-    return row === undefined || row === null ? 0 : Number(row["count"] ?? 0);
+    const row = await this.executor.get(query);
+    const count = row?.["count"];
+    return count === undefined || count === null ? 0 : Number(count);
   }
 }
