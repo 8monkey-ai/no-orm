@@ -3,10 +3,10 @@ import { LRUCache } from "lru-cache";
 import type { Adapter, Cursor, InferModel, Schema, Select, SortBy, Where } from "../types";
 import {
   assertNoPrimaryKeyUpdates,
-  getIdentityValues,
   getNestedValue,
   getPaginationFilter,
   getPrimaryKeyFields,
+  getPrimaryKeyValues,
 } from "./utils/common";
 
 type RowData = Record<string, unknown>;
@@ -68,7 +68,7 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
   }): Promise<T> {
     const { model, data, select } = args;
     const pkIndex = this.pkIndexes.get(model)!;
-    const pkValue = this.serializePK(model, data);
+    const pkValue = this.getPrimaryKeyString(model, data);
 
     if (pkIndex.has(pkValue)) {
       throw new Error(`Record with primary key ${pkValue} already exists in ${model}`);
@@ -97,13 +97,13 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     const { model, where, select } = args;
 
     // Fast path: PK lookup
-    const pkFields = getPrimaryKeyFields(this.schema[model]!);
+    const primaryKeyFields = getPrimaryKeyFields(this.schema[model]!);
     // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- checking for field-based clause
     const w = where as { field?: string; op?: string; value?: unknown };
     if (
       w.field !== undefined &&
-      pkFields.length === 1 &&
-      w.field === pkFields[0] &&
+      primaryKeyFields.length === 1 &&
+      w.field === primaryKeyFields[0] &&
       w.op === "eq"
     ) {
       const pkValue = String(w.value);
@@ -213,7 +213,7 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     select?: Select<T>;
   }): Promise<T> {
     const { model, create, update, where, select } = args;
-    const pkValue = this.serializePK(model, create);
+    const pkValue = this.getPrimaryKeyString(model, create);
     const existing = this.pkIndexes.get(model)!.get(pkValue);
 
     if (existing !== undefined) {
@@ -305,18 +305,18 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
 
     // Cleanup indexes
     this.indexMap.delete(row);
-    const pkValue = this.serializePK(model, row);
+    const pkValue = this.getPrimaryKeyString(model, row);
     pkIndex.delete(pkValue);
   }
 
-  private serializePK(modelName: string, data: Record<string, unknown>): string {
+  private getPrimaryKeyString(modelName: string, data: Record<string, unknown>): string {
     const modelSpec = this.schema[modelName as keyof S & string]!;
-    const pkValues = getIdentityValues(modelSpec, data);
-    const pkFields = getPrimaryKeyFields(modelSpec);
+    const primaryKeyValues = getPrimaryKeyValues(modelSpec, data);
+    const primaryKeyFields = getPrimaryKeyFields(modelSpec);
     let res = "";
-    for (let i = 0; i < pkFields.length; i++) {
+    for (let i = 0; i < primaryKeyFields.length; i++) {
       if (i > 0) res += "|";
-      const val = pkValues[pkFields[i]!];
+      const val = primaryKeyValues[primaryKeyFields[i]!];
       if (val !== null && val !== undefined) {
         if (typeof val === "object") {
           res += JSON.stringify(val);
@@ -395,15 +395,13 @@ export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
     cursor: Cursor<T>,
     sortBy?: SortBy<T>[],
   ): RowData[] {
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- cursor and sortBy are structurally compatible with non-generic variants
-    const paginationWhere = getPaginationFilter(cursor as Cursor, sortBy as SortBy[]);
+    const paginationWhere = getPaginationFilter(cursor, sortBy);
     if (!paginationWhere) return results;
 
     const filtered: RowData[] = [];
     for (let i = 0; i < results.length; i++) {
       const record = results[i]!;
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- paginationWhere matches the record shape
-      if (this.evaluateWhere(paginationWhere as Where<T>, record)) {
+      if (this.evaluateWhere(paginationWhere, record)) {
         filtered.push(record);
       }
     }

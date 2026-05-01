@@ -36,7 +36,7 @@ export type InferModel<M extends Model> = {
   [K in keyof M["fields"] as M["fields"][K]["nullable"] extends true ? never : K]: ResolveTSValue<
     M["fields"][K]["type"]
   >;
-} & Record<string, unknown>;
+};
 
 type ResolveTSValue<T extends FieldType> = T extends "string"
   ? string
@@ -197,5 +197,5 @@ export interface SortBy<T = Record<string, unknown>> {
 }
 
 export interface Cursor<T = Record<string, unknown>> {
-  after: Partial<Record<FieldName<T>, unknown>>;
+  after: Partial<{ [K in FieldName<T>]: unknown }>;
 }

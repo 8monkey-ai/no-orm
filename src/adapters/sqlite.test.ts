@@ -507,7 +507,7 @@ describe("SqliteAdapter", () => {
         where: { field: "is_active", op: "eq", value: true },
       });
       expect(users).toHaveLength(2);
-      // oxlint-disable-next-line unicorn/no-array-sort
+      // oxlint-disable-next-line unicorn/no-array-sort -- sorting IDs for comparison
       expect(users.map((u) => u["id"]).sort()).toEqual(["b1", "b3"]);
     });
 

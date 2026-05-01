@@ -1,4 +1,4 @@
-import type { Cursor, Model, SortBy, Where } from "../../types";
+import type { Cursor, FieldName, Model, SortBy, Where } from "../../types";
 
 // --- Schema & Logic Helpers ---
 
@@ -9,14 +9,14 @@ export function getPrimaryKeyFields(model: Model): string[] {
 /**
  * Extracts primary key values from a data object based on the model schema.
  */
-export function getIdentityValues(
+export function getPrimaryKeyValues(
   model: Model,
   data: Record<string, unknown>,
 ): Record<string, unknown> {
-  const pkFields = getPrimaryKeyFields(model);
+  const primaryKeyFields = getPrimaryKeyFields(model);
   const values: Record<string, unknown> = {};
-  for (let i = 0; i < pkFields.length; i++) {
-    const field = pkFields[i]!;
+  for (let i = 0; i < primaryKeyFields.length; i++) {
+    const field = primaryKeyFields[i]!;
     if (!(field in data)) {
       throw new Error(`Missing primary key field: ${field}`);
     }
@@ -27,27 +27,31 @@ export function getIdentityValues(
 
 /**
  * Builds a 'Where' filter targeting the primary key of a specific record.
- * Returns Where<Record<string, unknown>> — callers cast to Where<T> at the boundary.
  */
-export function buildIdentityFilter(model: Model, source: Record<string, unknown>): Where {
-  const pkFields = getPrimaryKeyFields(model);
-  if (pkFields.length === 1) {
-    const field = pkFields[0]!;
-    return { field, op: "eq" as const, value: source[field] };
+export function buildPrimaryKeyFilter<T = Record<string, unknown>>(
+  model: Model,
+  source: Record<string, unknown>,
+): Where<T> {
+  const primaryKeyFields = getPrimaryKeyFields(model);
+  if (primaryKeyFields.length === 1) {
+    const field = primaryKeyFields[0]!;
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- field name from schema is guaranteed to be in T
+    return { field: field as FieldName<T>, op: "eq" as const, value: source[field] };
   }
 
-  const clauses: Where[] = [];
-  for (let i = 0; i < pkFields.length; i++) {
-    const field = pkFields[i]!;
-    clauses.push({ field, op: "eq" as const, value: source[field] });
+  const clauses: Where<T>[] = [];
+  for (let i = 0; i < primaryKeyFields.length; i++) {
+    const field = primaryKeyFields[i]!;
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- field name from schema is guaranteed to be in T
+    clauses.push({ field: field as FieldName<T>, op: "eq" as const, value: source[field] });
   }
   return { and: clauses };
 }
 
 export function assertNoPrimaryKeyUpdates(model: Model, data: Record<string, unknown>): void {
-  const pkFields = getPrimaryKeyFields(model);
-  for (let i = 0; i < pkFields.length; i++) {
-    const field = pkFields[i]!;
+  const primaryKeyFields = getPrimaryKeyFields(model);
+  for (let i = 0; i < primaryKeyFields.length; i++) {
+    const field = primaryKeyFields[i]!;
     if (data[field] !== undefined) {
       throw new Error("Primary key updates are not supported.");
     }
@@ -82,19 +86,23 @@ export function getNestedValue(
   return val;
 }
 
-export function getPaginationFilter(cursor: Cursor, sortBy?: SortBy[]): Where | undefined {
+export function getPaginationFilter<T = Record<string, unknown>>(
+  cursor: Cursor<T>,
+  sortBy?: SortBy<T>[],
+): Where<T> | undefined {
   const criteria = getPaginationCriteria(cursor, sortBy);
   if (criteria.length === 0) return undefined;
 
   const cursorValues = cursor.after as Record<string, unknown>;
-  const orClauses: Where[] = [];
+  const orClauses: Where<T>[] = [];
 
   for (let i = 0; i < criteria.length; i++) {
-    const andClauses: Where[] = [];
+    const andClauses: Where<T>[] = [];
     for (let j = 0; j < i; j++) {
       const prev = criteria[j]!;
       andClauses.push({
-        field: prev.field,
+        // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- criteria field is guaranteed to be in T
+        field: prev.field as FieldName<T>,
         path: prev.path,
         op: "eq",
         value: cursorValues[prev.field],
@@ -102,7 +110,8 @@ export function getPaginationFilter(cursor: Cursor, sortBy?: SortBy[]): Where | 
     }
     const curr = criteria[i]!;
     andClauses.push({
-      field: curr.field,
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- criteria field is guaranteed to be in T
+      field: curr.field as FieldName<T>,
       path: curr.path,
       op: curr.direction === "desc" ? "lt" : "gt",
       value: cursorValues[curr.field],
@@ -116,9 +125,9 @@ export function getPaginationFilter(cursor: Cursor, sortBy?: SortBy[]): Where | 
 /**
  * Normalizes pagination criteria from a cursor and optional sort parameters.
  */
-export function getPaginationCriteria(
-  cursor: Cursor,
-  sortBy?: SortBy[],
+export function getPaginationCriteria<T = Record<string, unknown>>(
+  cursor: Cursor<T>,
+  sortBy?: SortBy<T>[],
 ): { field: string; direction: "asc" | "desc"; path?: string[] }[] {
   const cursorValues = cursor.after as Record<string, unknown>;
   const criteria = [];

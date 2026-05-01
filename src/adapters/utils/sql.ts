@@ -41,11 +41,12 @@ export function isQueryExecutor(obj: unknown): obj is QueryExecutor {
 export function toRow<T extends Record<string, unknown>>(
   model: Model,
   row: Record<string, unknown>,
-  select?: Select<Record<string, unknown>>,
+  select?: Select<T>,
 ): T {
   const fields = model.fields;
   const res: Record<string, unknown> = {};
-  const keys = select ?? Object.keys(row);
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- select fields are strings
+  const keys = (select as readonly string[]) ?? Object.keys(row);
 
   for (let i = 0; i < keys.length; i++) {
     const k = keys[i]!;

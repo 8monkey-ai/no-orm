@@ -566,7 +566,7 @@ describe("MemoryAdapter", () => {
     });
 
     it("should throw error if primary key is missing in 'create' data", () => {
-      // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
+      // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- deliberate invalid data for error case
       const invalidData = {
         name: "Missing ID",
         age: 20,

@@ -16,10 +16,10 @@ import type {
 } from "../types";
 import {
   assertNoPrimaryKeyUpdates,
-  buildIdentityFilter,
-  getIdentityValues,
+  buildPrimaryKeyFilter,
   getPaginationFilter,
   getPrimaryKeyFields,
+  getPrimaryKeyValues,
 } from "./utils/common";
 import {
   type QueryExecutor,
@@ -103,9 +103,9 @@ function toColumnExpr(
   return { strings: [`json_extract(${quoted}, ?)`], params: [serializeJsonPath(path)] };
 }
 
-function toWhereRecursive(
+function toWhereRecursive<T>(
   model: Model,
-  where: Where,
+  where: Where<T>,
   quoteFn: (s: string) => string = quote,
 ): Fragment {
   if ("and" in where) {
@@ -124,7 +124,7 @@ function toWhereRecursive(
     return join(parts, " OR ");
   }
 
-  const expr = toColumnExpr(model, where.field, where.path, quoteFn);
+  const expr = toColumnExpr(model, where.field as string, where.path, quoteFn);
   const val = where.value;
   const mappedVal = typeof val === "boolean" ? (val ? 1 : 0) : val;
 
@@ -172,11 +172,11 @@ function toWhereRecursive(
   }
 }
 
-function toWhere(
+function toWhere<T>(
   model: Model,
-  where?: Where,
-  cursor?: Cursor,
-  sortBy?: SortBy[],
+  where?: Where<T>,
+  cursor?: Cursor<T>,
+  sortBy?: SortBy<T>[],
   quoteFn: (s: string) => string = quote,
 ): Fragment {
   const parts: Fragment[] = [];
@@ -338,8 +338,8 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
         ([fname, f]) =>
           `${this.getQuotedField(name as keyof S, fname)} ${mapFieldType(f)}${f.nullable === true ? "" : " NOT NULL"}`,
       );
-      const pkFields = getPrimaryKeyFields(model);
-      const pk = `PRIMARY KEY (${pkFields.map((f) => this.getQuotedField(name as keyof S, f)).join(", ")})`;
+      const primaryKeyFields = getPrimaryKeyFields(model);
+      const pk = `PRIMARY KEY (${primaryKeyFields.map((f) => this.getQuotedField(name as keyof S, f)).join(", ")})`;
       // eslint-disable-next-line no-await-in-loop -- DDL is intentionally sequential
       await this.executor.run({
         strings: [
@@ -388,7 +388,7 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
     const fields = Object.keys(input);
     const sqlFields = fields.map((f) => this.getQuotedField(modelName, f)).join(", ");
     const sqlSelect = select
-      ? select.map((s) => this.getQuotedField(modelName, s as string)).join(", ")
+      ? select.map((s) => this.getQuotedField(modelName, s)).join(", ")
       : "*";
 
     const strings = [`INSERT INTO ${this.getQuotedModel(modelName)} (${sqlFields}) VALUES (`];
@@ -400,15 +400,14 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
     if (row === undefined || row === null) {
       const res = await this.find({
         model: modelName,
-        // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- identity filter matches T
-        where: buildIdentityFilter(model, getIdentityValues(model, data)) as Where<T>,
+        where: buildPrimaryKeyFilter<T>(model, getPrimaryKeyValues(model, data)),
         select,
       });
       if (!res) throw new Error("Failed to insert record");
       return res;
     }
     // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- mapped fields match the shape of T
-    return toRow<T>(model, row, select as Select<Record<string, unknown>>);
+    return toRow<T>(model, row, select);
   }
 
   async find<
@@ -418,10 +417,9 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
     const { model: modelName, where, select } = args;
     const model = this.schema[modelName]!;
     const quoter = (f: string) => this.getQuotedField(modelName, f);
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where matches model fields
-    const built = toWhere(model, where as Where, undefined, undefined, quoter);
+    const built = toWhere(model, where, undefined, undefined, quoter);
     const sqlSelect = select
-      ? select.map((s) => this.getQuotedField(modelName, s as string)).join(", ")
+      ? select.map((s) => this.getQuotedField(modelName, s)).join(", ")
       : "*";
 
     const query = wrap(
@@ -433,7 +431,7 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
     const row = await this.executor.get(query);
     if (row === undefined || row === null) return null;
     // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- select matches model fields at runtime
-    return toRow<T>(model, row, select as Select<Record<string, unknown>>);
+    return toRow<T>(model, row, select);
   }
 
   async findMany<
@@ -451,10 +449,9 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
     const { model: modelName, where, select, sortBy, limit, offset, cursor } = args;
     const model = this.schema[modelName]!;
     const quoter = (f: string) => this.getQuotedField(modelName, f);
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- input parameters match where/cursor/sortBy shapes
-    const built = toWhere(model, where as Where, cursor as Cursor, sortBy as SortBy[], quoter);
+    const built = toWhere(model, where, cursor, sortBy, quoter);
     const sqlSelect = select
-      ? select.map((s) => this.getQuotedField(modelName, s as string)).join(", ")
+      ? select.map((s) => this.getQuotedField(modelName, s)).join(", ")
       : "*";
 
     const query = wrap(
@@ -495,7 +492,7 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
     const result: T[] = [];
     for (let i = 0; i < rows.length; i++) {
       // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- mapped fields match the shape of T
-      result.push(toRow<T>(model, rows[i]!, select as Select<Record<string, unknown>>));
+      result.push(toRow<T>(model, rows[i]!, select));
     }
     return result;
   }
@@ -523,8 +520,7 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
     const setFrag = join(setParts, ", ");
 
     const quoter = (f: string) => this.getQuotedField(modelName, f);
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where matches at runtime
-    const whereFrag = toWhere(model, where as Where, undefined, undefined, quoter);
+    const whereFrag = toWhere(model, where, undefined, undefined, quoter);
     const query = join(
       [wrap(setFrag, `UPDATE ${this.getQuotedModel(modelName)} SET `, ""), whereFrag],
       " WHERE ",
@@ -559,8 +555,7 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
     const setFrag = join(setParts, ", ");
 
     const quoter = (f: string) => this.getQuotedField(modelName, f);
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where matches at runtime
-    const whereFrag = toWhere(model, where as Where, undefined, undefined, quoter);
+    const whereFrag = toWhere(model, where, undefined, undefined, quoter);
     const query = join(
       [wrap(setFrag, `UPDATE ${this.getQuotedModel(modelName)} SET `, ""), whereFrag],
       " WHERE ",
@@ -588,10 +583,10 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
     const cFields = Object.keys(insertRow);
     const updateRow = toDbRow(model, uData, mapSqliteValue);
     const uFields = Object.keys(updateRow);
-    const pkFields = getPrimaryKeyFields(model);
+    const primaryKeyFields = getPrimaryKeyFields(model);
 
     const sqlFields = cFields.map((f) => this.getQuotedField(modelName, f)).join(", ");
-    const sqlConflict = pkFields.map((f) => this.getQuotedField(modelName, f)).join(", ");
+    const sqlConflict = primaryKeyFields.map((f) => this.getQuotedField(modelName, f)).join(", ");
 
     const strings = [`INSERT INTO ${this.getQuotedModel(modelName)} (${sqlFields}) VALUES (`];
     const params = [];
@@ -619,8 +614,7 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
 
       if (where) {
         const quoter = (f: string) => this.getQuotedField(modelName, f);
-        // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where matches at runtime
-        const built = toWhere(model, where as Where, undefined, undefined, quoter);
+        const built = toWhere(model, where, undefined, undefined, quoter);
         query.strings[query.strings.length - 1] += " WHERE ";
         query = join([query, built], "");
       }
@@ -629,20 +623,19 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
     }
 
     const sqlSelect = select
-      ? select.map((s) => this.getQuotedField(modelName, s as string)).join(", ")
+      ? select.map((s) => this.getQuotedField(modelName, s)).join(", ")
       : "*";
     query.strings[query.strings.length - 1] += ` RETURNING ${sqlSelect}`;
 
     const row = await this.executor.get(query);
     if (row !== undefined && row !== null) {
       // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- select matches model fields at runtime
-      return toRow<T>(model, row, select as Select<Record<string, unknown>>);
+      return toRow<T>(model, row, select);
     }
 
     const existing = await this.find({
       model: modelName,
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- identity filter matches T
-      where: buildIdentityFilter(model, getIdentityValues(model, cData)) as Where<T>,
+      where: buildPrimaryKeyFilter<T>(model, getPrimaryKeyValues(model, cData)),
       select,
     });
     if (existing === null) throw new Error("Failed to refetch record after upsert");
@@ -656,8 +649,7 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
     const { model: modelName, where } = args;
     const model = this.schema[modelName]!;
     const quoter = (f: string) => this.getQuotedField(modelName, f);
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where matches at runtime
-    const built = toWhere(model, where as Where, undefined, undefined, quoter);
+    const built = toWhere(model, where, undefined, undefined, quoter);
     const query = wrap(built, `DELETE FROM ${this.getQuotedModel(modelName)} WHERE `, "");
     await this.executor.run(query);
   }
@@ -669,8 +661,7 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
     const { model: modelName, where } = args;
     const model = this.schema[modelName]!;
     const quoter = (f: string) => this.getQuotedField(modelName, f);
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where matches at runtime
-    const built = toWhere(model, where as Where, undefined, undefined, quoter);
+    const built = toWhere(model, where, undefined, undefined, quoter);
     const query = wrap(built, `DELETE FROM ${this.getQuotedModel(modelName)} WHERE `, "");
     const res = await this.executor.run(query);
     return res.changes;
@@ -683,8 +674,7 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
     const { model: modelName, where } = args;
     const model = this.schema[modelName]!;
     const quoter = (f: string) => this.getQuotedField(modelName, f);
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where matches at runtime
-    const built = toWhere(model, where as Where, undefined, undefined, quoter);
+    const built = toWhere(model, where, undefined, undefined, quoter);
     const query = wrap(
       built,
       `SELECT COUNT(*) as count FROM ${this.getQuotedModel(modelName)} WHERE `,
