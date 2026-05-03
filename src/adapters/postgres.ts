@@ -1,3 +1,4 @@
+import type { SQL as BunSQL } from "bun";
 import type { Client as PgClient, Pool as PgPool, PoolClient as PgPoolClient } from "pg";
 import type postgres from "postgres";
 
@@ -34,7 +35,13 @@ import {
 type PostgresJsSql = postgres.Sql;
 type TransactionSql = postgres.TransactionSql;
 
-export type PostgresDriver = PgClient | PgPool | PgPoolClient | PostgresJsSql | TransactionSql;
+export type PostgresDriver =
+  | PgClient
+  | PgPool
+  | PgPoolClient
+  | PostgresJsSql
+  | TransactionSql
+  | BunSQL;
 
 /**
  * Limits the number of prepared statement objects kept in memory to prevent leaks
@@ -188,8 +195,8 @@ function toWhere<T>(
 
 // --- Driver detection ---
 
-function isBunSql(driver: PostgresDriver): boolean {
-  return "unsafe" in driver && "transaction" in driver;
+function isBunSql(driver: PostgresDriver): driver is BunSQL {
+  return typeof driver === "function" && "unsafe" in driver && "transaction" in driver;
 }
 
 function isPostgresJs(driver: PostgresDriver): driver is PostgresJsSql {
@@ -235,36 +242,27 @@ function createPostgresJsExecutor(
       return { changes: r.count ?? 0 };
     },
     transaction: <T>(fn: (executor: QueryExecutor) => Promise<T>) => {
+      // PostgresAdapter.transaction() short-circuits nested calls with `if (this.executor.inTransaction) return fn(this)`.
+      // This means we only ever enter here when NOT in a transaction, so we always use `begin` and never `savepoint`.
       if ("begin" in sql) {
         // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- T matches return type of fn
         return sql.begin((tx) => fn(createPostgresJsExecutor(tx, true))) as Promise<T>;
       }
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- T matches return type of fn
-      return sql.savepoint((tx) => fn(createPostgresJsExecutor(tx, true))) as Promise<T>;
+      throw new Error("Transaction not supported by driver (begin missing)");
     },
     inTransaction,
   };
 }
 
-function createBunSqlExecutor(
-  driver: Record<string, unknown>,
-  inTransaction = false,
-): QueryExecutor {
-  // Bun SQL driver is a callable function that also has a .transaction() method
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver is structurally checked in isBunSql
-  const bunSql = driver as unknown as ((
-    strings: TemplateStringsArray,
-    ...params: unknown[]
-  ) => Promise<Record<string, unknown>[]>) & {
-    transaction: <T>(fn: (tx: Record<string, unknown>) => Promise<T>) => Promise<T>;
-  };
-
+function createBunSqlExecutor(bunSql: BunSQL, inTransaction = false): QueryExecutor {
   const runQuery = (query: Fragment) => {
     // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- constructing TemplateStringsArray for driver call
     const strings = query.strings as string[] & { raw: string[] };
     strings.raw = query.strings;
     // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver call expects TemplateStringsArray
-    return bunSql(strings as unknown as TemplateStringsArray, ...query.params);
+    return bunSql(strings as unknown as TemplateStringsArray, ...query.params) as Promise<
+      Record<string, unknown>[]
+    >;
   };
 
   return {
@@ -285,7 +283,8 @@ function createBunSqlExecutor(
       return { changes };
     },
     transaction: <T>(fn: (executor: QueryExecutor) => Promise<T>) =>
-      bunSql.transaction((tx) => fn(createBunSqlExecutor(tx, true))),
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Bun TransactionSQL extends SQL
+      bunSql.transaction((tx) => fn(createBunSqlExecutor(tx as unknown as BunSQL, true))),
     inTransaction,
   };
 }
@@ -362,8 +361,7 @@ function createPgExecutor(
 }
 
 function createPostgresExecutor(driver: PostgresDriver): QueryExecutor {
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver is structurally checked in isBunSql
-  if (isBunSql(driver)) return createBunSqlExecutor(driver as unknown as Record<string, unknown>);
+  if (isBunSql(driver)) return createBunSqlExecutor(driver);
   if (isPostgresJs(driver)) return createPostgresJsExecutor(driver);
   if (isPg(driver)) return createPgExecutor(driver);
   throw new Error("Unsupported Postgres driver.");
@@ -415,7 +413,7 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
       for (let j = 0; j < fields.length; j++) {
         const [fieldName, field] = fields[j]!;
         const type = mapFieldType(field);
-        const         nullable = field.nullable === true ? "" : " NOT NULL";
+        const nullable = field.nullable === true ? "" : " NOT NULL";
         columnParts.push(`${this.getQuotedField(name as keyof S, fieldName)} ${type}${nullable}`);
       }
       const primaryKeyFields = getPrimaryKeyFields(model);
@@ -573,7 +571,7 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
   async update<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
-  >(args: { model: K; data: Partial<T>; where: Where<T>; select?: Select<T> }): Promise<T | null> {
+  >(args: { model: K; data: Partial<T>; where: Where<T> }): Promise<T | null> {
     const { model: modelName, data, where } = args;
     const model = this.schema[modelName]!;
     assertNoPrimaryKeyUpdates(model, data);

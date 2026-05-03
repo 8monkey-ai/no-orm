@@ -232,7 +232,7 @@ await adapter.transaction(async (tx) => {
 });
 ```
 
-SQLite and Postgres support nested transactions via savepoints.
+Nested calls to `transaction()` join the existing transaction.
 
 ## License
 

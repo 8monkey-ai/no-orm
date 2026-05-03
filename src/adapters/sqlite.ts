@@ -45,8 +45,10 @@ const MAX_CACHED_STATEMENTS = 100;
 
 const quote = (s: string) => `"${s.replaceAll('"', '""')}"`;
 
-const mapSqliteValue = (val: unknown, spec: Field) => {
-  if (spec.type === "boolean") return val === true ? 1 : 0;
+const mapSqliteValue = (val: unknown, spec?: Field) => {
+  if (spec?.type === "boolean" || (spec === undefined && typeof val === "boolean")) {
+    return val === true ? 1 : 0;
+  }
   return val;
 };
 
@@ -126,7 +128,8 @@ function toWhereRecursive<T>(
 
   const expr = toColumnExpr(model, where.field as string, where.path, quoteFn);
   const val = where.value;
-  const mappedVal = typeof val === "boolean" ? (val ? 1 : 0) : val;
+  const field = model.fields[where.field as string];
+  const mappedVal = mapSqliteValue(val, field);
 
   switch (where.op) {
     case "eq":
@@ -147,7 +150,7 @@ function toWhereRecursive<T>(
       // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val cast to unknown array for in operator
       const vArr = val as unknown[];
       if (!Array.isArray(vArr) || vArr.length === 0) return { strings: ["1=0"], params: [] };
-      const inParams = vArr.map((v): unknown => (typeof v === "boolean" ? (v ? 1 : 0) : v));
+      const inParams = vArr.map((v) => mapSqliteValue(v, field));
       const inFrag: Fragment = {
         // eslint-disable-next-line unicorn/no-new-array -- creating array of specific length for placeholders
         strings: [" IN (", ...new Array<string>(vArr.length - 1).fill(", "), ")"],
@@ -159,7 +162,7 @@ function toWhereRecursive<T>(
       // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val cast to unknown array for not_in operator
       const vArr = val as unknown[];
       if (!Array.isArray(vArr) || vArr.length === 0) return { strings: ["1=1"], params: [] };
-      const inParams = vArr.map((v): unknown => (typeof v === "boolean" ? (v ? 1 : 0) : v));
+      const inParams = vArr.map((v) => mapSqliteValue(v, field));
       const inFrag: Fragment = {
         // eslint-disable-next-line unicorn/no-new-array -- creating array of specific length for placeholders
         strings: [" NOT IN (", ...new Array<string>(vArr.length - 1).fill(", "), ")"],
@@ -500,7 +503,7 @@ export class SqliteAdapter<S extends Schema = Schema> implements Adapter<S> {
   async update<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
-  >(args: { model: K; data: Partial<T>; where: Where<T>; select?: Select<T> }): Promise<T | null> {
+  >(args: { model: K; data: Partial<T>; where: Where<T> }): Promise<T | null> {
     const { model: modelName, data, where } = args;
     const model = this.schema[modelName]!;
     assertNoPrimaryKeyUpdates(model, data);
