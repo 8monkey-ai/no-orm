@@ -165,6 +165,9 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     return Promise.resolve(final);
   }
 
+  /**
+   * Updates the first record matching the criteria. Primary key updates are rejected.
+   */
   update<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
     model: K;
     where: Where<T>;
@@ -185,6 +188,9 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     return Promise.resolve(null);
   }
 
+  /**
+   * Updates all records matching the criteria. Primary key updates are rejected.
+   */
   updateMany<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
@@ -205,6 +211,13 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     return Promise.resolve(count);
   }
 
+  /**
+   * Performs an atomic insert-or-update.
+   *
+   * Conflicts are always handled on the Primary Key. If `where` is provided, the record
+   * is only updated if the condition is met (acting as a predicate). Primary key
+   * updates are rejected.
+   */
   upsert<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
     model: K;
     create: T;

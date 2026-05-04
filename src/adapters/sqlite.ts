@@ -63,7 +63,7 @@ function mapFieldType(field: Field): string {
       return "INTEGER";
     case "json":
     case "json[]":
-      return "TEXT";
+      return "TEXT"; // SQLite stores JSON as plain text
     default:
       return "TEXT";
   }
@@ -202,14 +202,6 @@ function createSqliteExecutor(driver: SqliteDriver): QueryExecutor {
 
 /**
  * SQLite Adapter for no-orm.
- *
- * Notes:
- * - upsert always conflicts on the Primary Key.
- * - Optional where in upsert acts as a predicate -- record is only updated if condition is met.
- * - Primary-key updates are rejected to keep adapter behavior consistent.
- * - SQLite stores JSON as text; Postgres stores JSON as jsonb.
- * - number and timestamp use standard JavaScript Number. bigint is not supported in v1.
- * - DDL must be sequential: some drivers don't support concurrent DDL on one connection.
  */
 export class SqliteAdapter<S extends Schema> implements Adapter<S> {
   private executor: QueryExecutor;
@@ -366,6 +358,9 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     return result;
   }
 
+  /**
+   * Updates the first record matching the criteria. Primary key updates are rejected.
+   */
   async update<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
@@ -394,6 +389,9 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     return toRow<T>(model, row);
   }
 
+  /**
+   * Updates all records matching the criteria. Primary key updates are rejected.
+   */
   async updateMany<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
@@ -416,6 +414,13 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     return res.changes;
   }
 
+  /**
+   * Performs an atomic insert-or-update.
+   *
+   * Conflicts are always handled on the Primary Key. If `where` is provided, the record
+   * is only updated if the condition is met (acting as a predicate). Primary key
+   * updates are rejected.
+   */
   async upsert<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,

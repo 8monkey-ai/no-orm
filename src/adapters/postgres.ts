@@ -65,7 +65,7 @@ function mapFieldType(field: Field): string {
       return "BIGINT";
     case "json":
     case "json[]":
-      return "JSONB";
+      return "JSONB"; // Postgres stores JSON as binary jsonb for efficiency
     default:
       return "TEXT";
   }
@@ -276,15 +276,6 @@ function createPostgresExecutor(driver: PostgresDriver): QueryExecutor {
 
 /**
  * Postgres Adapter for no-orm.
- *
- * Notes:
- * - Sequential DDL: Create tables first, then indexes.
- * - SQLite stores JSON as text; Postgres stores JSON as jsonb.
- * - Driver support: node-postgres (pg), postgres.js, and Bun.SQL.
- * - upsert always conflicts on the Primary Key.
- * - Optional where in upsert acts as a predicate -- record is only updated if condition is met.
- * - Primary-key updates are rejected to keep adapter behavior consistent.
- * - number and timestamp use standard JavaScript Number. bigint is not supported in v1.
  */
 export class PostgresAdapter<S extends Schema> implements Adapter<S> {
   private executor: QueryExecutor;
@@ -436,6 +427,9 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     return result;
   }
 
+  /**
+   * Updates the first record matching the criteria. Primary key updates are rejected.
+   */
   async update<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
@@ -464,6 +458,9 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     return toRow<T>(model, row);
   }
 
+  /**
+   * Updates all records matching the criteria. Primary key updates are rejected.
+   */
   async updateMany<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
@@ -486,6 +483,13 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     return res.changes;
   }
 
+  /**
+   * Performs an atomic insert-or-update.
+   *
+   * Conflicts are always handled on the Primary Key. If `where` is provided, the record
+   * is only updated if the condition is met (acting as a predicate). Primary key
+   * updates are rejected.
+   */
   async upsert<
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
