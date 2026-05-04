@@ -1,5 +1,5 @@
-import type { Field, Model, Select } from "../../types";
-import { mapNumeric } from "./common";
+import type { Cursor, Field, Model, Select, SortBy, Where } from "../../types";
+import { getPaginationFilter, mapNumeric } from "./common";
 
 /**
  * A Fragment keeps SQL logic and dynamic data separate to prevent injection.
@@ -137,3 +137,129 @@ export function wrap(fragment: Fragment, prefix: string, suffix: string): Fragme
   return { strings, params: [...fragment.params] };
 }
 
+export type ColumnExprFn = (fieldName: string, path?: string[], value?: unknown) => Fragment;
+export type MapValueFn = (val: unknown, field?: Field) => unknown;
+
+export interface BuildOptions {
+  model: Model;
+  columnExpr: ColumnExprFn;
+  mapValue?: MapValueFn;
+}
+
+function whereRecursive<T>(clause: Where<T>, options: BuildOptions): Fragment {
+  if ("and" in clause) {
+    const parts: Fragment[] = [];
+    for (let i = 0; i < clause.and.length; i++) {
+      parts.push(wrap(whereRecursive(clause.and[i]!, options), "(", ")"));
+    }
+    return join(parts, " AND ");
+  }
+
+  if ("or" in clause) {
+    const parts: Fragment[] = [];
+    for (let i = 0; i < clause.or.length; i++) {
+      parts.push(wrap(whereRecursive(clause.or[i]!, options), "(", ")"));
+    }
+    return join(parts, " OR ");
+  }
+
+  const expr = options.columnExpr(clause.field as string, clause.path, clause.value);
+  const val = clause.value;
+  const field = options.model.fields[clause.field as string];
+  const mapped = options.mapValue ? options.mapValue(val, field) : val;
+
+  switch (clause.op) {
+    case "eq":
+      if (val === null) return wrap(expr, "", " IS NULL");
+      return join([expr, { strings: [" = ", ""], params: [mapped] }], "");
+    case "ne":
+      if (val === null) return wrap(expr, "", " IS NOT NULL");
+      return join([expr, { strings: [" != ", ""], params: [mapped] }], "");
+    case "gt":
+      return join([expr, { strings: [" > ", ""], params: [mapped] }], "");
+    case "gte":
+      return join([expr, { strings: [" >= ", ""], params: [mapped] }], "");
+    case "lt":
+      return join([expr, { strings: [" < ", ""], params: [mapped] }], "");
+    case "lte":
+      return join([expr, { strings: [" <= ", ""], params: [mapped] }], "");
+    case "in": {
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val cast to unknown array for in operator
+      const vArr = val as unknown[];
+      if (!Array.isArray(vArr) || vArr.length === 0) return { strings: ["1=0"], params: [] };
+      const params = options.mapValue ? vArr.map((v) => options.mapValue!(v, field)) : vArr;
+      const inFrag: Fragment = {
+        // eslint-disable-next-line unicorn/no-new-array -- creating array of specific length for placeholders
+        strings: [" IN (", ...new Array<string>(vArr.length - 1).fill(", "), ")"],
+        params,
+      };
+      return join([expr, inFrag], "");
+    }
+    case "not_in": {
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val cast to unknown array for not_in operator
+      const vArr = val as unknown[];
+      if (!Array.isArray(vArr) || vArr.length === 0) return { strings: ["1=1"], params: [] };
+      const params = options.mapValue ? vArr.map((v) => options.mapValue!(v, field)) : vArr;
+      const inFrag: Fragment = {
+        // eslint-disable-next-line unicorn/no-new-array -- creating array of specific length for placeholders
+        strings: [" NOT IN (", ...new Array<string>(vArr.length - 1).fill(", "), ")"],
+        params,
+      };
+      return join([expr, inFrag], "");
+    }
+    default:
+      throw new Error(`Unsupported operator: ${String((clause as Record<string, unknown>)["op"])}`);
+  }
+}
+
+export function where<T>(
+  clause: Where<T> | undefined,
+  options: BuildOptions & { cursor?: Cursor<T>; sortBy?: SortBy<T>[] },
+): Fragment {
+  const parts: Fragment[] = [];
+
+  if (clause) {
+    parts.push(wrap(whereRecursive(clause, options), "(", ")"));
+  }
+
+  if (options.cursor) {
+    const paginationWhere = getPaginationFilter(options.cursor, options.sortBy);
+    if (paginationWhere) {
+      parts.push(wrap(whereRecursive(paginationWhere, options), "(", ")"));
+    }
+  }
+
+  return parts.length > 0 ? join(parts, " AND ") : { strings: ["1=1"], params: [] };
+}
+
+/**
+ * Prepares a SET clause for UPDATE or UPSERT.
+ */
+export function set(data: Record<string, unknown>, quote: (s: string) => string): Fragment {
+  const fields = Object.keys(data);
+  if (fields.length === 0) throw new Error("set() called with empty data");
+  const parts: Fragment[] = [];
+  for (let i = 0; i < fields.length; i++) {
+    const f = fields[i]!;
+    parts.push({
+      strings: [`${quote(f)} = `, ""],
+      params: [data[f]],
+    });
+  }
+  return join(parts, ", ");
+}
+
+/**
+ * Prepares an ORDER BY clause.
+ */
+export function sort<T>(sortBy: SortBy<T>[], columnExpr: ColumnExprFn): Fragment {
+  if (sortBy.length === 0) throw new Error("sort() called with empty sortBy");
+  const parts: Fragment[] = [];
+  for (let i = 0; i < sortBy.length; i++) {
+    const s = sortBy[i]!;
+    const expr = columnExpr(s.field as string, s.path);
+    const dir = (s.direction ?? "asc").toUpperCase();
+    parts.push(wrap(expr, "", ` ${dir}`));
+  }
+  return join(parts, ", ");
+}

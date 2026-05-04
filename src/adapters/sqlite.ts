@@ -17,7 +17,6 @@ import type {
 import {
   assertNoPrimaryKeyUpdates,
   buildPrimaryKeyFilter,
-  getPaginationFilter,
   getPrimaryKeyFields,
   getPrimaryKeyValues,
 } from "./utils/common";
@@ -29,6 +28,9 @@ import {
   type Fragment,
   join,
   wrap,
+  where,
+  set,
+  sort,
 } from "./utils/sql";
 
 export type SqliteDriver = SqliteDatabase | BunDatabase | BetterSqlite3Database;
@@ -88,112 +90,14 @@ function serializeJsonPath(path: string[]): string {
   return jsonPath;
 }
 
-function toColumnExpr(
-  model: Model,
-  fieldName: string,
-  path?: string[],
-  quoteFn: (s: string) => string = quote,
-): Fragment {
-  const quoted = quoteFn(fieldName);
+function toColumnExpr(model: Model, fieldName: string, path?: string[]): Fragment {
+  const quoted = quote(fieldName);
   if (!path || path.length === 0) return { strings: [quoted], params: [] };
   const field = model.fields[fieldName];
   if (field?.type !== "json" && field?.type !== "json[]") {
     throw new Error(`Cannot use JSON path on non-JSON field: ${fieldName}`);
   }
   return { strings: [`json_extract(${quoted}, ?)`], params: [serializeJsonPath(path)] };
-}
-
-function toWhereRecursive<T>(
-  model: Model,
-  where: Where<T>,
-  quoteFn: (s: string) => string = quote,
-): Fragment {
-  if ("and" in where) {
-    const parts: Fragment[] = [];
-    for (let i = 0; i < where.and.length; i++) {
-      parts.push(wrap(toWhereRecursive(model, where.and[i]!, quoteFn), "(", ")"));
-    }
-    return join(parts, " AND ");
-  }
-
-  if ("or" in where) {
-    const parts: Fragment[] = [];
-    for (let i = 0; i < where.or.length; i++) {
-      parts.push(wrap(toWhereRecursive(model, where.or[i]!, quoteFn), "(", ")"));
-    }
-    return join(parts, " OR ");
-  }
-
-  const expr = toColumnExpr(model, where.field as string, where.path, quoteFn);
-  const val = where.value;
-  const field = model.fields[where.field as string];
-  const mappedVal = mapSqliteValue(val, field);
-
-  switch (where.op) {
-    case "eq":
-      if (val === null) return wrap(expr, "", " IS NULL");
-      return join([expr, { strings: [" = ", ""], params: [mappedVal] }], "");
-    case "ne":
-      if (val === null) return wrap(expr, "", " IS NOT NULL");
-      return join([expr, { strings: [" != ", ""], params: [mappedVal] }], "");
-    case "gt":
-      return join([expr, { strings: [" > ", ""], params: [mappedVal] }], "");
-    case "gte":
-      return join([expr, { strings: [" >= ", ""], params: [mappedVal] }], "");
-    case "lt":
-      return join([expr, { strings: [" < ", ""], params: [mappedVal] }], "");
-    case "lte":
-      return join([expr, { strings: [" <= ", ""], params: [mappedVal] }], "");
-    case "in": {
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val cast to unknown array for in operator
-      const vArr = val as unknown[];
-      if (!Array.isArray(vArr) || vArr.length === 0) return { strings: ["1=0"], params: [] };
-      const inParams = vArr.map((v) => mapSqliteValue(v, field));
-      const inFrag: Fragment = {
-        // eslint-disable-next-line unicorn/no-new-array -- creating array of specific length for placeholders
-        strings: [" IN (", ...new Array<string>(vArr.length - 1).fill(", "), ")"],
-        params: inParams,
-      };
-      return join([expr, inFrag], "");
-    }
-    case "not_in": {
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val cast to unknown array for not_in operator
-      const vArr = val as unknown[];
-      if (!Array.isArray(vArr) || vArr.length === 0) return { strings: ["1=1"], params: [] };
-      const inParams = vArr.map((v) => mapSqliteValue(v, field));
-      const inFrag: Fragment = {
-        // eslint-disable-next-line unicorn/no-new-array -- creating array of specific length for placeholders
-        strings: [" NOT IN (", ...new Array<string>(vArr.length - 1).fill(", "), ")"],
-        params: inParams,
-      };
-      return join([expr, inFrag], "");
-    }
-    default:
-      throw new Error(`Unsupported operator: ${String((where as Record<string, unknown>)["op"])}`);
-  }
-}
-
-function toWhere<T>(
-  model: Model,
-  where?: Where<T>,
-  cursor?: Cursor<T>,
-  sortBy?: SortBy<T>[],
-  quoteFn: (s: string) => string = quote,
-): Fragment {
-  const parts: Fragment[] = [];
-
-  if (where) {
-    parts.push(wrap(toWhereRecursive(model, where, quoteFn), "(", ")"));
-  }
-
-  if (cursor) {
-    const paginationWhere = getPaginationFilter(cursor, sortBy);
-    if (paginationWhere) {
-      parts.push(wrap(toWhereRecursive(model, paginationWhere, quoteFn), "(", ")"));
-    }
-  }
-
-  return parts.length > 0 ? join(parts, " AND ") : { strings: ["1=1"], params: [] };
 }
 
 // --- Driver detection and executors ---
@@ -317,6 +221,14 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     this.executor = isQueryExecutor(driver) ? driver : createSqliteExecutor(driver);
   }
 
+  private getOptions(model: Model) {
+    return {
+      model,
+      columnExpr: (f: string, p?: string[]) => toColumnExpr(model, f, p),
+      mapValue: mapSqliteValue,
+    };
+  }
+
   async migrate(): Promise<void> {
     const models = Object.entries(this.schema);
 
@@ -333,9 +245,7 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
       const pk = `PRIMARY KEY (${primaryKeyFields.map((f) => quote(f)).join(", ")})`;
       // eslint-disable-next-line no-await-in-loop -- DDL is intentionally sequential
       await this.executor.run({
-        strings: [
-          `CREATE TABLE IF NOT EXISTS ${quote(name)} (${columns.join(", ")}, ${pk})`,
-        ],
+        strings: [`CREATE TABLE IF NOT EXISTS ${quote(name)} (${columns.join(", ")}, ${pk})`],
         params: [],
       });
     }
@@ -348,8 +258,7 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
         const idx = model.indexes[j]!;
         const fields = Array.isArray(idx.field) ? idx.field : [idx.field];
         const formatted = fields.map(
-          (f) =>
-            `${quote(f)}${idx.order ? ` ${idx.order.toUpperCase()}` : ""}`,
+          (f) => `${quote(f)}${idx.order ? ` ${idx.order.toUpperCase()}` : ""}`,
         );
         // eslint-disable-next-line no-await-in-loop -- DDL is intentionally sequential
         await this.executor.run({
@@ -364,9 +273,7 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
 
   transaction<T>(fn: (tx: Adapter<S>) => Promise<T>): Promise<T> {
     if (this.executor.inTransaction) return fn(this);
-    return this.executor.transaction((exec) =>
-      fn(new SqliteAdapter(this.schema, exec)),
-    );
+    return this.executor.transaction((exec) => fn(new SqliteAdapter(this.schema, exec)));
   }
 
   async create<
@@ -378,9 +285,7 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     const input = toDbRow(model, data, mapSqliteValue);
     const fields = Object.keys(input);
     const sqlFields = fields.map((f) => quote(f)).join(", ");
-    const sqlSelect = select
-      ? select.map((s) => quote(s)).join(", ")
-      : "*";
+    const sqlSelect = select ? select.map((s) => quote(s)).join(", ") : "*";
 
     const strings = [`INSERT INTO ${quote(modelName)} (${sqlFields}) VALUES (`];
     for (let i = 1; i < fields.length; i++) strings.push(", ");
@@ -405,18 +310,12 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: { model: K; where: Where<T>; select?: Select<T> }): Promise<T | null> {
-    const { model: modelName, where, select } = args;
+    const { model: modelName, select } = args;
     const model = this.schema[modelName]!;
-    const built = toWhere(model, where);
-    const sqlSelect = select
-      ? select.map((s) => quote(s)).join(", ")
-      : "*";
+    const built = where(args.where, this.getOptions(model));
+    const sqlSelect = select ? select.map((s) => quote(s)).join(", ") : "*";
 
-    const query = wrap(
-      built,
-      `SELECT ${sqlSelect} FROM ${quote(modelName)} WHERE `,
-      " LIMIT 1",
-    );
+    const query = wrap(built, `SELECT ${sqlSelect} FROM ${quote(modelName)} WHERE `, " LIMIT 1");
 
     const row = await this.executor.get(query);
     if (row === undefined || row === null) return null;
@@ -436,35 +335,16 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     offset?: number;
     cursor?: Cursor<T>;
   }): Promise<T[]> {
-    const { model: modelName, where, select, sortBy, limit, offset, cursor } = args;
+    const { model: modelName, select, sortBy, limit, offset, cursor } = args;
     const model = this.schema[modelName]!;
-    const built = toWhere(model, where, cursor, sortBy);
-    const sqlSelect = select
-      ? select.map((s) => quote(s)).join(", ")
-      : "*";
+    const opts = this.getOptions(model);
+    const built = where(args.where, Object.assign({}, opts, { cursor, sortBy }));
+    const sqlSelect = select ? select.map((s) => quote(s)).join(", ") : "*";
 
-    const query = wrap(
-      built,
-      `SELECT ${sqlSelect} FROM ${quote(modelName)} WHERE `,
-      "",
-    );
+    let query = wrap(built, `SELECT ${sqlSelect} FROM ${quote(modelName)} WHERE `, "");
 
     if (sortBy && sortBy.length > 0) {
-      query.strings[query.strings.length - 1] += " ORDER BY ";
-      for (let i = 0; i < sortBy.length; i++) {
-        const s = sortBy[i]!;
-        const expr = toColumnExpr(model, s.field, s.path);
-        const dir = (s.direction ?? "asc").toUpperCase();
-        if (i > 0) query.strings[query.strings.length - 1] += ", ";
-        query.strings[query.strings.length - 1] += expr.strings[0]!;
-        for (let j = 1; j < expr.strings.length; j++) {
-          query.strings.push(expr.strings[j]!);
-        }
-        for (let j = 0; j < expr.params.length; j++) {
-          query.params.push(expr.params[j]);
-        }
-        query.strings[query.strings.length - 1] += ` ${dir}`;
-      }
+      query = join([query, sort(sortBy, opts.columnExpr)], " ORDER BY ");
     }
     if (limit !== undefined) {
       query.strings[query.strings.length - 1] += " LIMIT ";
@@ -490,25 +370,17 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: { model: K; data: Partial<T>; where: Where<T> }): Promise<T | null> {
-    const { model: modelName, data, where } = args;
+    const { model: modelName, data } = args;
     const model = this.schema[modelName]!;
     assertNoPrimaryKeyUpdates(model, data);
     const input = toDbRow(model, data, mapSqliteValue);
     const fields = Object.keys(input);
 
-    if (fields.length === 0) return this.find({ model: modelName, where, select: undefined });
+    if (fields.length === 0)
+      return this.find({ model: modelName, where: args.where, select: undefined });
 
-    const setParts: Fragment[] = [];
-    for (let i = 0; i < fields.length; i++) {
-      const f = fields[i]!;
-      setParts.push({
-        strings: [`${quote(f)} = `, ""],
-        params: [input[f]],
-      });
-    }
-    const setFrag = join(setParts, ", ");
-
-    const whereFrag = toWhere(model, where);
+    const setFrag = set(input, quote);
+    const whereFrag = where(args.where, this.getOptions(model));
     const query = join(
       [wrap(setFrag, `UPDATE ${quote(modelName)} SET `, ""), whereFrag],
       " WHERE ",
@@ -516,7 +388,8 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     query.strings[query.strings.length - 1] += " RETURNING *";
 
     const row = await this.executor.get(query);
-    if (row === undefined || row === null) return this.find({ model: modelName, where });
+    if (row === undefined || row === null)
+      return this.find({ model: modelName, where: args.where });
     // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- mapped fields match the shape of T
     return toRow<T>(model, row);
   }
@@ -525,24 +398,15 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: { model: K; where?: Where<T>; data: Partial<T> }): Promise<number> {
-    const { model: modelName, where, data } = args;
+    const { model: modelName, data } = args;
     const model = this.schema[modelName]!;
     assertNoPrimaryKeyUpdates(model, data);
     const input = toDbRow(model, data, mapSqliteValue);
     const fields = Object.keys(input);
     if (fields.length === 0) return 0;
 
-    const setParts: Fragment[] = [];
-    for (let i = 0; i < fields.length; i++) {
-      const f = fields[i]!;
-      setParts.push({
-        strings: [`${quote(f)} = `, ""],
-        params: [input[f]],
-      });
-    }
-    const setFrag = join(setParts, ", ");
-
-    const whereFrag = toWhere(model, where);
+    const setFrag = set(input, quote);
+    const whereFrag = where(args.where, this.getOptions(model));
     const query = join(
       [wrap(setFrag, `UPDATE ${quote(modelName)} SET `, ""), whereFrag],
       " WHERE ",
@@ -562,7 +426,7 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     where?: Where<T>;
     select?: Select<T>;
   }): Promise<T> {
-    const { model: modelName, create: cData, update: uData, where, select } = args;
+    const { model: modelName, create: cData, update: uData, select } = args;
     const model = this.schema[modelName]!;
     assertNoPrimaryKeyUpdates(model, uData);
 
@@ -587,20 +451,12 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     let query: Fragment = { strings, params };
 
     if (uFields.length > 0) {
-      const setParts: Fragment[] = [];
-      for (let i = 0; i < uFields.length; i++) {
-        const f = uFields[i]!;
-        setParts.push({
-          strings: [`${quote(f)} = `, ""],
-          params: [updateRow[f]],
-        });
-      }
-      const setFrag = join(setParts, ", ");
+      const setFrag = set(updateRow, quote);
       query.strings[query.strings.length - 1] += "DO UPDATE SET ";
       query = join([query, setFrag], "");
 
-      if (where) {
-        const built = toWhere(model, where);
+      if (args.where) {
+        const built = where(args.where, this.getOptions(model));
         query.strings[query.strings.length - 1] += " WHERE ";
         query = join([query, built], "");
       }
@@ -608,9 +464,7 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
       query.strings[query.strings.length - 1] += "DO NOTHING";
     }
 
-    const sqlSelect = select
-      ? select.map((s) => quote(s)).join(", ")
-      : "*";
+    const sqlSelect = select ? select.map((s) => quote(s)).join(", ") : "*";
     query.strings[query.strings.length - 1] += ` RETURNING ${sqlSelect}`;
 
     const row = await this.executor.get(query);
@@ -632,9 +486,9 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: { model: K; where: Where<T> }): Promise<void> {
-    const { model: modelName, where } = args;
+    const { model: modelName } = args;
     const model = this.schema[modelName]!;
-    const built = toWhere(model, where);
+    const built = where(args.where, this.getOptions(model));
     const query = wrap(built, `DELETE FROM ${quote(modelName)} WHERE `, "");
     await this.executor.run(query);
   }
@@ -643,9 +497,9 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: { model: K; where?: Where<T> }): Promise<number> {
-    const { model: modelName, where } = args;
+    const { model: modelName } = args;
     const model = this.schema[modelName]!;
-    const built = toWhere(model, where);
+    const built = where(args.where, this.getOptions(model));
     const query = wrap(built, `DELETE FROM ${quote(modelName)} WHERE `, "");
     const res = await this.executor.run(query);
     return res.changes;
@@ -655,16 +509,11 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     K extends keyof S & string,
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: { model: K; where?: Where<T> }): Promise<number> {
-    const { model: modelName, where } = args;
+    const { model: modelName } = args;
     const model = this.schema[modelName]!;
-    const built = toWhere(model, where);
-    const query = wrap(
-      built,
-      `SELECT COUNT(*) as count FROM ${quote(modelName)} WHERE `,
-      "",
-    );
+    const built = where(args.where, this.getOptions(model));
+    const query = wrap(built, `SELECT COUNT(*) as count FROM ${quote(modelName)} WHERE `, "");
     const row = await this.executor.get(query);
-    const count = row?.["count"];
-    return count === undefined || count === null ? 0 : Number(count);
+    return Number(row?.["count"] ?? 0);
   }
 }

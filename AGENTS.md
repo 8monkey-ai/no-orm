@@ -38,10 +38,10 @@ src/
     sqlite.ts           SqliteAdapter (Autonomous SQL + Execution)
     utils/
       common.ts         Shared PK, pagination, and value helpers
-      sql.ts            QueryExecutor interface and toRow helper (shared SQL logic)
+      sql.ts            QueryExecutor interface, toRow helper, and shared SQL clause builders (where, set, sort)
 ```
 
-Each adapter file is self-contained: SQL building, driver detection, executor factories, and adapter class all live together.
+Each adapter file is self-contained for driver detection and executor factories, but relies on `utils/sql.ts` for atomic clause generation.
 
 ## Local Commands
 
@@ -117,7 +117,7 @@ Storage holds `Record<string, unknown>` (RowData) but the adapter interface prom
 
 ### SQL logic is autonomous
 
-Each SQL adapter class (`PostgresAdapter`, `SqliteAdapter`) implements the `Adapter` interface by owning its SQL generation and execution flow. This significantly reduces abstraction leaks, improves readability, and allows for database-specific optimizations (like `RETURNING` clauses). Shared domain logic (PKs, pagination AST) lives in `common.ts`.
+Each SQL adapter class (`PostgresAdapter`, `SqliteAdapter`) implements the `Adapter` interface by owning its SQL orchestration (template assembly, `RETURNING`, `ON CONFLICT`), while relying on `utils/sql.ts` for atomic clause generation (`where`, `set`, `sort`). This significantly reduces abstraction leaks, improves readability, and allows for database-specific optimizations. Shared domain logic (PKs, pagination AST) lives in `common.ts`.
 
 ### QueryExecutor is the driver abstraction
 
