@@ -26,8 +26,6 @@ import {
   toRow,
   toDbRow,
   type Fragment,
-  type QuotedSchema,
-  createQuotedSchema,
   join,
   wrap,
 } from "./utils/sql";
@@ -51,7 +49,7 @@ const MAX_CACHED_STATEMENTS = 100;
 
 // --- Internal PG Syntax Helpers ---
 
-const quote = (s: string) => `"${s.replaceAll('"', '""')}"`;
+const quote = (s: string) => `"${s}"`;
 
 function mapFieldType(field: Field): string {
   switch (field.type) {
@@ -381,24 +379,14 @@ function createPostgresExecutor(driver: PostgresDriver): QueryExecutor {
  * - Primary-key updates are rejected to keep adapter behavior consistent.
  * - number and timestamp use standard JavaScript Number. bigint is not supported in v1.
  */
-export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
+export class PostgresAdapter<S extends Schema> implements Adapter<S> {
   private executor: QueryExecutor;
 
   constructor(
     private schema: S,
     driver: PostgresDriver | QueryExecutor,
-    private quoted: QuotedSchema = createQuotedSchema(schema, quote),
   ) {
     this.executor = isQueryExecutor(driver) ? driver : createPostgresExecutor(driver);
-  }
-
-  private getQuotedModel(name: keyof S): string {
-    const key = String(name);
-    return this.quoted.models[key] ?? quote(key);
-  }
-
-  private getQuotedField(model: keyof S, field: string): string {
-    return this.quoted.fields[String(model)]?.[field] ?? quote(field);
   }
 
   async migrate(): Promise<void> {
@@ -414,14 +402,14 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
         const [fieldName, field] = fields[j]!;
         const type = mapFieldType(field);
         const nullable = field.nullable === true ? "" : " NOT NULL";
-        columnParts.push(`${this.getQuotedField(name as keyof S, fieldName)} ${type}${nullable}`);
+        columnParts.push(`${quote(fieldName)} ${type}${nullable}`);
       }
       const primaryKeyFields = getPrimaryKeyFields(model);
-      const pk = `PRIMARY KEY (${primaryKeyFields.map((f) => this.getQuotedField(name as keyof S, f)).join(", ")})`;
+      const pk = `PRIMARY KEY (${primaryKeyFields.map((f) => quote(f)).join(", ")})`;
       // eslint-disable-next-line no-await-in-loop -- DDL is intentionally sequential
       await this.executor.run({
         strings: [
-          `CREATE TABLE IF NOT EXISTS ${this.getQuotedModel(name as keyof S)} (${columnParts.join(", ")}, ${pk})`,
+          `CREATE TABLE IF NOT EXISTS ${quote(name)} (${columnParts.join(", ")}, ${pk})`,
         ],
         params: [],
       });
@@ -436,12 +424,12 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
         const fields = Array.isArray(idx.field) ? idx.field : [idx.field];
         const formatted = fields.map(
           (f) =>
-            `${this.getQuotedField(name as keyof S, f)}${idx.order ? ` ${idx.order.toUpperCase()}` : ""}`,
+            `${quote(f)}${idx.order ? ` ${idx.order.toUpperCase()}` : ""}`,
         );
         // eslint-disable-next-line no-await-in-loop -- DDL is intentionally sequential
         await this.executor.run({
           strings: [
-            `CREATE INDEX IF NOT EXISTS ${quote(`idx_${name}_${j}`)} ON ${this.getQuotedModel(name as keyof S)} (${formatted.join(", ")})`,
+            `CREATE INDEX IF NOT EXISTS ${quote(`idx_${name}_${j}`)} ON ${quote(name)} (${formatted.join(", ")})`,
           ],
           params: [],
         });
@@ -452,7 +440,7 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
   transaction<T>(fn: (tx: Adapter<S>) => Promise<T>): Promise<T> {
     if (this.executor.inTransaction) return fn(this);
     return this.executor.transaction((exec) =>
-      fn(new PostgresAdapter(this.schema, exec, this.quoted)),
+      fn(new PostgresAdapter(this.schema, exec)),
     );
   }
 
@@ -464,12 +452,12 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
     const model = this.schema[modelName]!;
     const input = toDbRow(model, data);
     const fields = Object.keys(input);
-    const sqlFields = fields.map((f) => this.getQuotedField(modelName, f)).join(", ");
+    const sqlFields = fields.map((f) => quote(f)).join(", ");
     const sqlSelect = select
-      ? select.map((s) => this.getQuotedField(modelName, s)).join(", ")
+      ? select.map((s) => quote(s)).join(", ")
       : "*";
 
-    const strings = [`INSERT INTO ${this.getQuotedModel(modelName)} (${sqlFields}) VALUES (`];
+    const strings = [`INSERT INTO ${quote(modelName)} (${sqlFields}) VALUES (`];
     for (let i = 1; i < fields.length; i++) strings.push(", ");
     strings.push(`) RETURNING ${sqlSelect}`);
     const params = fields.map((f) => input[f]);
@@ -486,16 +474,15 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
   >(args: { model: K; where: Where<T>; select?: Select<T> }): Promise<T | null> {
     const { model: modelName, where, select } = args;
     const model = this.schema[modelName]!;
-    const quoter = (f: string) => this.getQuotedField(modelName, f);
     // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Where matches model fields
-    const built = toWhere(model, where, undefined, undefined, quoter);
+    const built = toWhere(model, where);
     const sqlSelect = select
-      ? select.map((s) => this.getQuotedField(modelName, s)).join(", ")
+      ? select.map((s) => quote(s)).join(", ")
       : "*";
 
     const query = wrap(
       built,
-      `SELECT ${sqlSelect} FROM ${this.getQuotedModel(modelName)} WHERE `,
+      `SELECT ${sqlSelect} FROM ${quote(modelName)} WHERE `,
       " LIMIT 1",
     );
 
@@ -519,15 +506,14 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
   }): Promise<T[]> {
     const { model: modelName, where, select, sortBy, limit, offset, cursor } = args;
     const model = this.schema[modelName]!;
-    const quoter = (f: string) => this.getQuotedField(modelName, f);
-    const built = toWhere(model, where, cursor, sortBy, quoter);
+    const built = toWhere(model, where, cursor, sortBy);
     const sqlSelect = select
-      ? select.map((s) => this.getQuotedField(modelName, s)).join(", ")
+      ? select.map((s) => quote(s)).join(", ")
       : "*";
 
     const query = wrap(
       built,
-      `SELECT ${sqlSelect} FROM ${this.getQuotedModel(modelName)} WHERE `,
+      `SELECT ${sqlSelect} FROM ${quote(modelName)} WHERE `,
       "",
     );
 
@@ -535,7 +521,7 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
       query.strings[query.strings.length - 1] += " ORDER BY ";
       for (let i = 0; i < sortBy.length; i++) {
         const s = sortBy[i]!;
-        const expr = toColumnExpr(model, s.field, s.path, undefined, quoter);
+        const expr = toColumnExpr(model, s.field, s.path);
         const dir = (s.direction ?? "asc").toUpperCase();
         if (i > 0) query.strings[query.strings.length - 1] += ", ";
         query.strings[query.strings.length - 1] += expr.strings[0]!;
@@ -584,16 +570,15 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
     for (let i = 0; i < fields.length; i++) {
       const f = fields[i]!;
       setParts.push({
-        strings: [`${this.getQuotedField(modelName, f)} = `, ""],
+        strings: [`${quote(f)} = `, ""],
         params: [input[f]],
       });
     }
     const setFrag = join(setParts, ", ");
 
-    const quoter = (f: string) => this.getQuotedField(modelName, f);
-    const whereFrag = toWhere(model, where, undefined, undefined, quoter);
+    const whereFrag = toWhere(model, where);
     const query = join(
-      [wrap(setFrag, `UPDATE ${this.getQuotedModel(modelName)} SET `, ""), whereFrag],
+      [wrap(setFrag, `UPDATE ${quote(modelName)} SET `, ""), whereFrag],
       " WHERE ",
     );
     query.strings[query.strings.length - 1] += " RETURNING *";
@@ -619,16 +604,15 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
     for (let i = 0; i < fields.length; i++) {
       const f = fields[i]!;
       setParts.push({
-        strings: [`${this.getQuotedField(modelName, f)} = `, ""],
+        strings: [`${quote(f)} = `, ""],
         params: [input[f]],
       });
     }
     const setFrag = join(setParts, ", ");
 
-    const quoter = (f: string) => this.getQuotedField(modelName, f);
-    const whereFrag = toWhere(model, where, undefined, undefined, quoter);
+    const whereFrag = toWhere(model, where);
     const query = join(
-      [wrap(setFrag, `UPDATE ${this.getQuotedModel(modelName)} SET `, ""), whereFrag],
+      [wrap(setFrag, `UPDATE ${quote(modelName)} SET `, ""), whereFrag],
       " WHERE ",
     );
 
@@ -656,11 +640,11 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
     const uFields = Object.keys(updateRow);
     const primaryKeyFields = getPrimaryKeyFields(model);
 
-    const sqlFields = cFields.map((f) => this.getQuotedField(modelName, f)).join(", ");
-    const sqlConflict = primaryKeyFields.map((f) => this.getQuotedField(modelName, f)).join(", ");
+    const sqlFields = cFields.map((f) => quote(f)).join(", ");
+    const sqlConflict = primaryKeyFields.map((f) => quote(f)).join(", ");
 
     let query: Fragment = {
-      strings: [`INSERT INTO ${this.getQuotedModel(modelName)} (${sqlFields}) VALUES (`],
+      strings: [`INSERT INTO ${quote(modelName)} (${sqlFields}) VALUES (`],
       params: [],
     };
     for (let i = 0; i < cFields.length; i++) {
@@ -675,7 +659,7 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
       for (let i = 0; i < uFields.length; i++) {
         const f = uFields[i]!;
         setParts.push({
-          strings: [`${this.getQuotedField(modelName, f)} = `, ""],
+          strings: [`${quote(f)} = `, ""],
           params: [updateRow[f]],
         });
       }
@@ -684,8 +668,7 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
       query = join([query, setFrag], "");
 
       if (where) {
-        const quoter = (f: string) => this.getQuotedField(modelName, f);
-        const built = toWhere(model, where, undefined, undefined, quoter);
+        const built = toWhere(model, where);
         query.strings[query.strings.length - 1] += " WHERE ";
         query = join([query, built], "");
       }
@@ -694,7 +677,7 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
     }
 
     const sqlSelect = select
-      ? select.map((s) => this.getQuotedField(modelName, s)).join(", ")
+      ? select.map((s) => quote(s)).join(", ")
       : "*";
     query.strings[query.strings.length - 1] += ` RETURNING ${sqlSelect}`;
 
@@ -719,9 +702,8 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
   >(args: { model: K; where: Where<T> }): Promise<void> {
     const { model: modelName, where } = args;
     const model = this.schema[modelName]!;
-    const quoter = (f: string) => this.getQuotedField(modelName, f);
-    const built = toWhere(model, where, undefined, undefined, quoter);
-    const query = wrap(built, `DELETE FROM ${this.getQuotedModel(modelName)} WHERE `, "");
+    const built = toWhere(model, where);
+    const query = wrap(built, `DELETE FROM ${quote(modelName)} WHERE `, "");
     await this.executor.run(query);
   }
 
@@ -731,9 +713,8 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
   >(args: { model: K; where?: Where<T> }): Promise<number> {
     const { model: modelName, where } = args;
     const model = this.schema[modelName]!;
-    const quoter = (f: string) => this.getQuotedField(modelName, f);
-    const built = toWhere(model, where, undefined, undefined, quoter);
-    const query = wrap(built, `DELETE FROM ${this.getQuotedModel(modelName)} WHERE `, "");
+    const built = toWhere(model, where);
+    const query = wrap(built, `DELETE FROM ${quote(modelName)} WHERE `, "");
     const res = await this.executor.run(query);
     return res.changes;
   }
@@ -744,11 +725,10 @@ export class PostgresAdapter<S extends Schema = Schema> implements Adapter<S> {
   >(args: { model: K; where?: Where<T> }): Promise<number> {
     const { model: modelName, where } = args;
     const model = this.schema[modelName]!;
-    const quoter = (f: string) => this.getQuotedField(modelName, f);
-    const built = toWhere(model, where, undefined, undefined, quoter);
+    const built = toWhere(model, where);
     const query = wrap(
       built,
-      `SELECT COUNT(*) as count FROM ${this.getQuotedModel(modelName)} WHERE `,
+      `SELECT COUNT(*) as count FROM ${quote(modelName)} WHERE `,
       "",
     );
     const row = await this.executor.get(query);

@@ -26,7 +26,7 @@ export interface MemoryAdapterOptions {
  * - Global Eviction: A single LRUCache tracks all rows across all tables to enforce maxItems.
  * - O(1) Removals: Uses an index map and swap-and-pop to remove evicted rows without array shifts.
  */
-export class MemoryAdapter<S extends Schema = Schema> implements Adapter<S> {
+export class MemoryAdapter<S extends Schema> implements Adapter<S> {
   private tables = new Map<keyof S, RowData[]>();
   private pkIndexes = new Map<keyof S, Map<string, RowData>>();
   private indexMap = new Map<RowData, number>();

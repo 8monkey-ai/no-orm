@@ -1,4 +1,4 @@
-import type { Field, Model, Schema, Select } from "../../types";
+import type { Field, Model, Select } from "../../types";
 import { mapNumeric } from "./common";
 
 /**
@@ -18,11 +18,6 @@ export interface QueryExecutor {
   transaction<T>(fn: (executor: QueryExecutor) => Promise<T>): Promise<T>;
   readonly inTransaction: boolean;
 }
-
-export type QuotedSchema = {
-  models: Record<string, string>;
-  fields: Record<string, Record<string, string>>;
-};
 
 export function isQueryExecutor(obj: unknown): obj is QueryExecutor {
   if (typeof obj !== "object" || obj === null) return false;
@@ -142,20 +137,3 @@ export function wrap(fragment: Fragment, prefix: string, suffix: string): Fragme
   return { strings, params: [...fragment.params] };
 }
 
-export function createQuotedSchema(schema: Schema, quote: (s: string) => string): QuotedSchema {
-  const quoted: QuotedSchema = { models: {}, fields: {} };
-  const models = Object.keys(schema);
-  for (let i = 0; i < models.length; i++) {
-    const modelName = models[i]!;
-    quoted.models[modelName] = quote(modelName);
-
-    const fields = Object.keys(schema[modelName]!.fields);
-    const quotedFields: Record<string, string> = {};
-    for (let j = 0; j < fields.length; j++) {
-      const fieldName = fields[j]!;
-      quotedFields[fieldName] = quote(fieldName);
-    }
-    quoted.fields[modelName] = quotedFields;
-  }
-  return quoted;
-}
