@@ -193,60 +193,99 @@ export interface BuildOptions {
   mapValue?: MapValueFn;
 }
 
-function whereRecursive<T>(clause: Where<T>, options: BuildOptions): Sql {
-  if ("and" in clause) {
-    const parts: Sql[] = [];
-    for (let i = 0; i < clause.and.length; i++) {
-      parts.push(sql`(${whereRecursive(clause.and[i]!, options)})`);
+function buildWhere<T>(clause: Where<T>, options: BuildOptions): Sql {
+  const stack: { clause: Where<T>; processed: boolean }[] = [{ clause, processed: false }];
+  const results: Sql[] = [];
+
+  while (stack.length > 0) {
+    // eslint-disable-next-line typescript-eslint/no-non-null-assertion -- stack length checked
+    const item = stack.pop()!;
+    const c = item.clause;
+
+    // Handle logical composition (AND/OR)
+    if ("and" in c || "or" in c) {
+      const children = "and" in c ? c.and : c.or;
+
+      if (item.processed) {
+        // Second pass: All children have been processed and their results are in 'results' stack.
+        // We pop them, wrap in parentheses, and join with the operator.
+        const op = "and" in c ? " AND " : " OR ";
+        const parts: Sql[] = [];
+        for (let i = 0; i < children.length; i++) {
+          // eslint-disable-next-line typescript-eslint/no-non-null-assertion -- results match children count
+          parts.push(sql`(${results.pop()!})`);
+        }
+        // Parts were popped in reverse order, restore original order for deterministic SQL
+        parts.reverse();
+        results.push(join(parts, op));
+      } else {
+        // First pass: Push self back as 'processed', then push children to be processed.
+        stack.push({ clause: c, processed: true });
+        for (let i = children.length - 1; i >= 0; i--) {
+          // eslint-disable-next-line typescript-eslint/no-non-null-assertion -- children is a valid array
+          stack.push({ clause: children[i]!, processed: false });
+        }
+      }
+      continue;
     }
-    return join(parts, " AND ");
+
+    // Handle leaf nodes (individual field operations)
+    const expr = options.columnExpr(c.field as string, c.path, c.value);
+    const val = c.value;
+    const field = options.model.fields[c.field as string];
+    const mapped = options.mapValue ? options.mapValue(val, field) : val;
+
+    let res: Sql;
+    switch (c.op) {
+      case "eq":
+        res = val === null ? sql`${expr} IS NULL` : sql`${expr} = ${mapped}`;
+        break;
+      case "ne":
+        res = val === null ? sql`${expr} IS NOT NULL` : sql`${expr} != ${mapped}`;
+        break;
+      case "gt":
+        res = sql`${expr} > ${mapped}`;
+        break;
+      case "gte":
+        res = sql`${expr} >= ${mapped}`;
+        break;
+      case "lt":
+        res = sql`${expr} < ${mapped}`;
+        break;
+      case "lte":
+        res = sql`${expr} <= ${mapped}`;
+        break;
+      case "in": {
+        // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val cast to unknown array for in operator
+        const vArr = val as unknown[];
+        if (!Array.isArray(vArr) || vArr.length === 0) {
+          res = sql`1=0`;
+        } else {
+          const params = options.mapValue ? vArr.map((v) => options.mapValue!(v, field)) : vArr;
+          res = sql`${expr} IN (${paramList(params)})`;
+        }
+        break;
+      }
+      case "not_in": {
+        // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val cast to unknown array for not_in operator
+        const vArr = val as unknown[];
+        if (!Array.isArray(vArr) || vArr.length === 0) {
+          res = sql`1=1`;
+        } else {
+          const params = options.mapValue ? vArr.map((v) => options.mapValue!(v, field)) : vArr;
+          res = sql`${expr} NOT IN (${paramList(params)})`;
+        }
+        break;
+      }
+      default:
+        // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- accessing op for error message
+        throw new Error(`Unsupported operator: ${String((c as Record<string, unknown>)["op"])}`);
+    }
+    results.push(res);
   }
 
-  if ("or" in clause) {
-    const parts: Sql[] = [];
-    for (let i = 0; i < clause.or.length; i++) {
-      parts.push(sql`(${whereRecursive(clause.or[i]!, options)})`);
-    }
-    return join(parts, " OR ");
-  }
-
-  const expr = options.columnExpr(clause.field as string, clause.path, clause.value);
-  const val = clause.value;
-  const field = options.model.fields[clause.field as string];
-  const mapped = options.mapValue ? options.mapValue(val, field) : val;
-
-  switch (clause.op) {
-    case "eq":
-      if (val === null) return sql`${expr} IS NULL`;
-      return sql`${expr} = ${mapped}`;
-    case "ne":
-      if (val === null) return sql`${expr} IS NOT NULL`;
-      return sql`${expr} != ${mapped}`;
-    case "gt":
-      return sql`${expr} > ${mapped}`;
-    case "gte":
-      return sql`${expr} >= ${mapped}`;
-    case "lt":
-      return sql`${expr} < ${mapped}`;
-    case "lte":
-      return sql`${expr} <= ${mapped}`;
-    case "in": {
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val cast to unknown array for in operator
-      const vArr = val as unknown[];
-      if (!Array.isArray(vArr) || vArr.length === 0) return sql`1=0`;
-      const params = options.mapValue ? vArr.map((v) => options.mapValue!(v, field)) : vArr;
-      return sql`${expr} IN (${paramList(params)})`;
-    }
-    case "not_in": {
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val cast to unknown array for not_in operator
-      const vArr = val as unknown[];
-      if (!Array.isArray(vArr) || vArr.length === 0) return sql`1=1`;
-      const params = options.mapValue ? vArr.map((v) => options.mapValue!(v, field)) : vArr;
-      return sql`${expr} NOT IN (${paramList(params)})`;
-    }
-    default:
-      throw new Error(`Unsupported operator: ${String((clause as Record<string, unknown>)["op"])}`);
-  }
+  // eslint-disable-next-line typescript-eslint/no-non-null-assertion -- final result is always present
+  return results[0]!;
 }
 
 export function where<T>(
@@ -256,13 +295,13 @@ export function where<T>(
   const parts: Sql[] = [];
 
   if (clause) {
-    parts.push(sql`(${whereRecursive(clause, options)})`);
+    parts.push(sql`(${buildWhere(clause, options)})`);
   }
 
   if (options.cursor) {
     const paginationWhere = getPaginationFilter(options.cursor, options.sortBy);
     if (paginationWhere) {
-      parts.push(sql`(${whereRecursive(paginationWhere, options)})`);
+      parts.push(sql`(${buildWhere(paginationWhere, options)})`);
     }
   }
 
