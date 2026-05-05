@@ -54,12 +54,12 @@ const MAX_CACHED_STATEMENTS = 100;
 // --- Internal PG Syntax Helpers ---
 
 const quote = (s: string) => `"${s}"`;
-const id = (s: string) => raw(quote(s));
+const ident = (s: string) => raw(quote(s));
 const selectCols = (select?: readonly unknown[]) =>
   // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Select<T> keys are strings at runtime
   select ? idList(select as readonly string[], quote) : raw("*");
 
-function mapFieldType(field: Field): string {
+function sqlType(field: Field): string {
   switch (field.type) {
     case "string":
       return field.max === undefined ? "TEXT" : `VARCHAR(${field.max})`;
@@ -78,7 +78,7 @@ function mapFieldType(field: Field): string {
 }
 
 function toColumnExpr(model: Model, fieldName: string, path?: string[], value?: unknown): Sql {
-  if (!path || path.length === 0) return id(fieldName);
+  if (!path || path.length === 0) return ident(fieldName);
   const field = model.fields[fieldName];
   if (field?.type !== "json" && field?.type !== "json[]") {
     throw new Error(`Cannot use JSON path on non-JSON field: ${fieldName}`);
@@ -87,7 +87,7 @@ function toColumnExpr(model: Model, fieldName: string, path?: string[], value?: 
   const isNumeric = typeof value === "number";
   const isBoolean = typeof value === "boolean";
 
-  let res = sql`jsonb_extract_path_text(${id(fieldName)}, ${paramList(path)})`;
+  let res = sql`jsonb_extract_path_text(${ident(fieldName)}, ${paramList(path)})`;
   if (isNumeric) {
     res = sql`(${res})::double precision`;
   } else if (isBoolean) {
@@ -199,7 +199,7 @@ function createPgExecutor(
   const cache = new Map<string, string>();
   let statementCount = 0;
 
-  function getQuery(query: Sql) {
+  function getPrepared(query: Sql) {
     // pg needs a single string with $1, $2 placeholders
     const text = query.strings.reduce(
       (acc, s, i) => acc + s + (i < query.params.length ? "$" + (i + 1) : ""),
@@ -221,15 +221,15 @@ function createPgExecutor(
 
   return {
     all: async (q) => {
-      const res = await driver.query<Record<string, unknown>>(getQuery(q));
+      const res = await driver.query<Record<string, unknown>>(getPrepared(q));
       return res.rows;
     },
     get: async (q) => {
-      const res = await driver.query<Record<string, unknown>>(getQuery(q));
+      const res = await driver.query<Record<string, unknown>>(getPrepared(q));
       return res.rows[0];
     },
     run: async (q) => {
-      const res = await driver.query(getQuery(q));
+      const res = await driver.query(getPrepared(q));
       return { changes: res.rowCount ?? 0 };
     },
     transaction: async (fn) => {
@@ -285,13 +285,6 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     this.executor = isQueryExecutor(driver) ? driver : createPostgresExecutor(driver);
   }
 
-  private ctx(model: Model) {
-    return {
-      model,
-      columnExpr: (f: string, p?: string[], v?: unknown) => toColumnExpr(model, f, p, v),
-    };
-  }
-
   async migrate(): Promise<void> {
     const models = Object.entries(this.schema);
 
@@ -303,7 +296,7 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
       const columnParts: string[] = [];
       for (let j = 0; j < fields.length; j++) {
         const [fieldName, field] = fields[j]!;
-        const type = mapFieldType(field);
+        const type = sqlType(field);
         const nullable = field.nullable === true ? "" : " NOT NULL";
         columnParts.push(`${quote(fieldName)} ${type}${nullable}`);
       }
@@ -311,7 +304,7 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
       const pk = `PRIMARY KEY (${primaryKeyFields.map((f) => quote(f)).join(", ")})`;
       // eslint-disable-next-line no-await-in-loop -- DDL is intentionally sequential
       await this.executor.run(sql`
-        CREATE TABLE IF NOT EXISTS ${id(name)} (
+        CREATE TABLE IF NOT EXISTS ${ident(name)} (
           ${raw(columnParts.join(", "))},
           ${raw(pk)}
         )
@@ -330,8 +323,8 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
         );
         // eslint-disable-next-line no-await-in-loop -- DDL is intentionally sequential
         await this.executor.run(sql`
-          CREATE INDEX IF NOT EXISTS ${id(`idx_${name}_${j}`)}
-          ON ${id(name)} (${raw(formatted.join(", "))})
+          CREATE INDEX IF NOT EXISTS ${ident(`idx_${name}_${j}`)}
+          ON ${ident(name)} (${raw(formatted.join(", "))})
         `);
       }
     }
@@ -351,7 +344,7 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const input = toDbRow(model, data);
     const fields = Object.keys(input);
     const query = sql`
-      INSERT INTO ${id(modelName)} (${idList(fields, quote)})
+      INSERT INTO ${ident(modelName)} (${idList(fields, quote)})
       VALUES (${paramList(fields.map((f) => input[f]))})
       RETURNING ${selectCols(select)}
     `;
@@ -370,8 +363,8 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const model = this.schema[modelName]!;
     const query = sql`
       SELECT ${selectCols(select)}
-      FROM ${id(modelName)}
-      WHERE ${where(args.where, this.ctx(model))}
+      FROM ${ident(modelName)}
+      WHERE ${where(args.where, { model, columnExpr: toColumnExpr })}
       LIMIT 1
     `;
 
@@ -395,15 +388,14 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
   }): Promise<T[]> {
     const { model: modelName, select, sortBy, limit, offset, cursor } = args;
     const model = this.schema[modelName]!;
-    const opts = this.ctx(model);
     let query = sql`
       SELECT ${selectCols(select)}
-      FROM ${id(modelName)}
-      WHERE ${where(args.where, Object.assign({}, opts, { cursor, sortBy }))}
+      FROM ${ident(modelName)}
+      WHERE ${where(args.where, { model, columnExpr: toColumnExpr, cursor, sortBy })}
     `;
 
     if (sortBy && sortBy.length > 0) {
-      query = sql`${query} ORDER BY ${sort(sortBy, opts.columnExpr)}`;
+      query = sql`${query} ORDER BY ${sort(model, sortBy, toColumnExpr)}`;
     }
     if (limit !== undefined) {
       query = sql`${query} LIMIT ${limit}`;
@@ -438,9 +430,9 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
       return this.find({ model: modelName, where: args.where, select: undefined });
 
     const query = sql`
-      UPDATE ${id(modelName)}
+      UPDATE ${ident(modelName)}
       SET ${set(input, quote)}
-      WHERE ${where(args.where, this.ctx(model))}
+      WHERE ${where(args.where, { model, columnExpr: toColumnExpr })}
       RETURNING *
     `;
 
@@ -466,9 +458,9 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     if (fields.length === 0) return 0;
 
     const query = sql`
-      UPDATE ${id(modelName)}
+      UPDATE ${ident(modelName)}
       SET ${set(input, quote)}
-      WHERE ${where(args.where, this.ctx(model))}
+      WHERE ${where(args.where, { model, columnExpr: toColumnExpr })}
     `;
 
     const res = await this.executor.run(query);
@@ -492,26 +484,29 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     where?: Where<T>;
     select?: Select<T>;
   }): Promise<T> {
-    const { model: modelName, create: cData, update: uData, select } = args;
+    const { model: modelName, create: createData, update: updateData, select } = args;
     const model = this.schema[modelName]!;
-    assertNoPrimaryKeyUpdates(model, uData);
+    assertNoPrimaryKeyUpdates(model, updateData);
 
-    const insertRow = toDbRow(model, cData);
-    const cFields = Object.keys(insertRow);
-    const updateRow = toDbRow(model, uData);
-    const uFields = Object.keys(updateRow);
+    const insertRow = toDbRow(model, createData);
+    const createFields = Object.keys(insertRow);
+    const updateRow = toDbRow(model, updateData);
+    const updateFields = Object.keys(updateRow);
     const primaryKeyFields = getPrimaryKeyFields(model);
 
     const action =
-      uFields.length === 0
+      updateFields.length === 0
         ? sql`DO NOTHING`
         : args.where
-          ? sql`DO UPDATE SET ${set(updateRow, quote)} WHERE ${where(args.where, this.ctx(model))}`
+          ? sql`DO UPDATE SET ${set(updateRow, quote)} WHERE ${where(args.where, {
+              model,
+              columnExpr: toColumnExpr,
+            })}`
           : sql`DO UPDATE SET ${set(updateRow, quote)}`;
 
     const query = sql`
-      INSERT INTO ${id(modelName)} (${idList(cFields, quote)})
-      VALUES (${paramList(cFields.map((f) => insertRow[f]))})
+      INSERT INTO ${ident(modelName)} (${idList(createFields, quote)})
+      VALUES (${paramList(createFields.map((f) => insertRow[f]))})
       ON CONFLICT (${idList(primaryKeyFields, quote)}) ${action}
       RETURNING ${selectCols(select)}
     `;
@@ -524,7 +519,7 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
 
     const existing = await this.find({
       model: modelName,
-      where: buildPrimaryKeyFilter<T>(model, getPrimaryKeyValues(model, cData)),
+      where: buildPrimaryKeyFilter<T>(model, getPrimaryKeyValues(model, createData)),
       select,
     });
     if (existing === null) throw new Error("Failed to refetch record after upsert");
@@ -538,8 +533,8 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const { model: modelName } = args;
     const model = this.schema[modelName]!;
     const query = sql`
-      DELETE FROM ${id(modelName)}
-      WHERE ${where(args.where, this.ctx(model))}
+      DELETE FROM ${ident(modelName)}
+      WHERE ${where(args.where, { model, columnExpr: toColumnExpr })}
     `;
     await this.executor.run(query);
   }
@@ -551,8 +546,8 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const { model: modelName } = args;
     const model = this.schema[modelName]!;
     const query = sql`
-      DELETE FROM ${id(modelName)}
-      WHERE ${where(args.where, this.ctx(model))}
+      DELETE FROM ${ident(modelName)}
+      WHERE ${where(args.where, { model, columnExpr: toColumnExpr })}
     `;
     const res = await this.executor.run(query);
     return res.changes;
@@ -566,8 +561,8 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const model = this.schema[modelName]!;
     const query = sql`
       SELECT COUNT(*) as count
-      FROM ${id(modelName)}
-      WHERE ${where(args.where, this.ctx(model))}
+      FROM ${ident(modelName)}
+      WHERE ${where(args.where, { model, columnExpr: toColumnExpr })}
     `;
     const row = await this.executor.get(query);
     return Number(row?.["count"] ?? 0);

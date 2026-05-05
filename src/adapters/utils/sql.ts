@@ -103,17 +103,17 @@ export function toRow<T extends Record<string, unknown>>(
   for (let i = 0; i < keys.length; i++) {
     const k = keys[i]!;
     const val = row[k];
-    const spec = fields[k];
-    if (spec === undefined || val === undefined || val === null) {
+    const field = fields[k];
+    if (field === undefined || val === undefined || val === null) {
       res[k] = val;
       continue;
     }
-    if (spec.type === "json" || spec.type === "json[]") {
+    if (field.type === "json" || field.type === "json[]") {
       res[k] = typeof val === "string" ? JSON.parse(val) : val;
-    } else if (spec.type === "boolean") {
+    } else if (field.type === "boolean") {
       // Postgres returns boolean, SQLite returns 1/0
       res[k] = val === true || val === 1;
-    } else if (spec.type === "number" || spec.type === "timestamp") {
+    } else if (field.type === "number" || field.type === "timestamp") {
       res[k] = mapNumeric(val);
     } else {
       res[k] = val;
@@ -138,7 +138,7 @@ export function toDbRow(
   for (let i = 0; i < keys.length; i++) {
     const k = keys[i]!;
     const val = data[k];
-    const spec = fields[k];
+    const field = fields[k];
     if (val === undefined) continue;
 
     if (val === null) {
@@ -146,17 +146,17 @@ export function toDbRow(
       continue;
     }
 
-    if (spec === undefined) {
+    if (field === undefined) {
       res[k] = val;
       continue;
     }
 
     let processed = val;
-    if (spec.type === "json" || spec.type === "json[]") {
+    if (field.type === "json" || field.type === "json[]") {
       processed = JSON.stringify(val);
     }
 
-    res[k] = mapValue ? mapValue(processed, spec) : processed;
+    res[k] = mapValue ? mapValue(processed, field) : processed;
   }
   return res;
 }
@@ -184,16 +184,16 @@ export function join(fragments: Sql[], separator: string): Sql {
   return new Sql(strings, params);
 }
 
-export type ColumnExprFn = (fieldName: string, path?: string[], value?: unknown) => Sql;
+export type ColumnExprFn = (model: Model, fieldName: string, path?: string[], value?: unknown) => Sql;
 export type MapValueFn = (val: unknown, field?: Field) => unknown;
 
-export interface BuildOptions {
+export interface WhereOptions {
   model: Model;
   columnExpr: ColumnExprFn;
   mapValue?: MapValueFn;
 }
 
-function buildWhere<T>(clause: Where<T>, options: BuildOptions): Sql {
+function buildWhere<T>(clause: Where<T>, options: WhereOptions): Sql {
   const stack: { clause: Where<T>; processed: boolean }[] = [{ clause, processed: false }];
   const results: Sql[] = [];
 
@@ -230,7 +230,7 @@ function buildWhere<T>(clause: Where<T>, options: BuildOptions): Sql {
     }
 
     // Handle leaf nodes (individual field operations)
-    const expr = options.columnExpr(c.field as string, c.path, c.value);
+    const expr = options.columnExpr(options.model, c.field as string, c.path, c.value);
     const val = c.value;
     const field = options.model.fields[c.field as string];
     const mapped = options.mapValue ? options.mapValue(val, field) : val;
@@ -257,22 +257,22 @@ function buildWhere<T>(clause: Where<T>, options: BuildOptions): Sql {
         break;
       case "in": {
         // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val cast to unknown array for in operator
-        const vArr = val as unknown[];
-        if (!Array.isArray(vArr) || vArr.length === 0) {
+        const values = val as unknown[];
+        if (!Array.isArray(values) || values.length === 0) {
           res = sql`1=0`;
         } else {
-          const params = options.mapValue ? vArr.map((v) => options.mapValue!(v, field)) : vArr;
+          const params = options.mapValue ? values.map((v) => options.mapValue!(v, field)) : values;
           res = sql`${expr} IN (${paramList(params)})`;
         }
         break;
       }
       case "not_in": {
         // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val cast to unknown array for not_in operator
-        const vArr = val as unknown[];
-        if (!Array.isArray(vArr) || vArr.length === 0) {
+        const values = val as unknown[];
+        if (!Array.isArray(values) || values.length === 0) {
           res = sql`1=1`;
         } else {
-          const params = options.mapValue ? vArr.map((v) => options.mapValue!(v, field)) : vArr;
+          const params = options.mapValue ? values.map((v) => options.mapValue!(v, field)) : values;
           res = sql`${expr} NOT IN (${paramList(params)})`;
         }
         break;
@@ -290,7 +290,7 @@ function buildWhere<T>(clause: Where<T>, options: BuildOptions): Sql {
 
 export function where<T>(
   clause: Where<T> | undefined,
-  options: BuildOptions & { cursor?: Cursor<T>; sortBy?: SortBy<T>[] },
+  options: WhereOptions & { cursor?: Cursor<T>; sortBy?: SortBy<T>[] },
 ): Sql {
   const parts: Sql[] = [];
 
@@ -325,12 +325,12 @@ export function set(data: Record<string, unknown>, quote: (s: string) => string)
 /**
  * Prepares an ORDER BY clause.
  */
-export function sort<T>(sortBy: SortBy<T>[], columnExpr: ColumnExprFn): Sql {
+export function sort<T>(model: Model, sortBy: SortBy<T>[], columnExpr: ColumnExprFn): Sql {
   if (sortBy.length === 0) throw new Error("sort() called with empty sortBy");
   const parts: Sql[] = [];
   for (let i = 0; i < sortBy.length; i++) {
     const s = sortBy[i]!;
-    const expr = columnExpr(s.field as string, s.path);
+    const expr = columnExpr(model, s.field as string, s.path);
     const dir = (s.direction ?? "asc").toUpperCase();
     parts.push(sql`${expr} ${raw(dir)}`);
   }
