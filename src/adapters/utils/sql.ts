@@ -1,5 +1,5 @@
 import type { Cursor, Field, Model, SortBy, Where } from "../../types";
-import { getPaginationFilter } from "./common";
+import { getPaginationFilter, walkWhere } from "./common";
 
 /**
  * A Sql instance keeps SQL logic and dynamic data separate to prevent injection.
@@ -136,92 +136,43 @@ export interface WhereOptions {
 }
 
 function buildWhere<T>(clause: Where<T>, options: WhereOptions): Sql {
-  const stack: { clause: Where<T>; processed: boolean }[] = [{ clause, processed: false }];
-  const results: Sql[] = [];
+  return walkWhere<Sql, T>(clause, {
+    and: (children) => join(children.map((c) => sql`(${c})`), " AND "),
+    or: (children) => join(children.map((c) => sql`(${c})`), " OR "),
+    leaf: (c) => {
+      const expr = options.columnExpr(options.model, c.field as string, c.path, c.value);
+      const field = options.model.fields[c.field as string];
+      const mapped = options.mapValue ? options.mapValue(c.value, field) : c.value;
 
-  while (stack.length > 0) {
-    const item = stack.pop()!;
-    const c = item.clause;
-
-    // Handle logical composition (AND/OR)
-    if ("and" in c || "or" in c) {
-      const children = "and" in c ? c.and : c.or;
-
-      if (item.processed) {
-        // Second pass: All children have been processed and their results are in 'results' stack.
-        // We pop them, wrap in parentheses, and join with the operator.
-        const op = "and" in c ? " AND " : " OR ";
-        const parts: Sql[] = [];
-        for (let i = 0; i < children.length; i++) {
-          parts.push(sql`(${results.pop()!})`);
+      switch (c.op) {
+        case "eq":
+          return c.value === null ? sql`${expr} IS NULL` : sql`${expr} = ${mapped}`;
+        case "ne":
+          return c.value === null ? sql`${expr} IS NOT NULL` : sql`${expr} != ${mapped}`;
+        case "gt":
+          return sql`${expr} > ${mapped}`;
+        case "gte":
+          return sql`${expr} >= ${mapped}`;
+        case "lt":
+          return sql`${expr} < ${mapped}`;
+        case "lte":
+          return sql`${expr} <= ${mapped}`;
+        case "in": {
+          if (c.value.length === 0) return sql`1=0`;
+          const params = options.mapValue ? c.value.map((v) => options.mapValue!(v, field)) : c.value;
+          return sql`${expr} IN (${paramList(params)})`;
         }
-        // Parts were popped in reverse order, restore original order for deterministic SQL
-        parts.reverse();
-        results.push(join(parts, op));
-      } else {
-        // First pass: Push self back as 'processed', then push children to be processed.
-        stack.push({ clause: c, processed: true });
-        for (let i = children.length - 1; i >= 0; i--) {
-          stack.push({ clause: children[i]!, processed: false });
+        case "not_in": {
+          if (c.value.length === 0) return sql`1=1`;
+          const params = options.mapValue ? c.value.map((v) => options.mapValue!(v, field)) : c.value;
+          return sql`${expr} NOT IN (${paramList(params)})`;
         }
+        default:
+          // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- accessing op for error message
+          throw new Error(`Unsupported operator: ${String((c as Record<string, unknown>)["op"])}`);
       }
-      continue;
-    }
-
-    // Handle leaf nodes (individual field operations)
-    const expr = options.columnExpr(options.model, c.field as string, c.path, c.value);
-    const val = c.value;
-    const field = options.model.fields[c.field as string];
-    const mapped = options.mapValue ? options.mapValue(val, field) : val;
-
-    let res: Sql;
-    switch (c.op) {
-      case "eq":
-        res = val === null ? sql`${expr} IS NULL` : sql`${expr} = ${mapped}`;
-        break;
-      case "ne":
-        res = val === null ? sql`${expr} IS NOT NULL` : sql`${expr} != ${mapped}`;
-        break;
-      case "gt":
-        res = sql`${expr} > ${mapped}`;
-        break;
-      case "gte":
-        res = sql`${expr} >= ${mapped}`;
-        break;
-      case "lt":
-        res = sql`${expr} < ${mapped}`;
-        break;
-      case "lte":
-        res = sql`${expr} <= ${mapped}`;
-        break;
-      case "in": {
-        const values = c.value;
-        if (values.length === 0) {
-          res = sql`1=0`;
-        } else {
-          const params = options.mapValue ? values.map((v) => options.mapValue!(v, field)) : values;
-          res = sql`${expr} IN (${paramList(params)})`;
-        }
-        break;
-      }
-      case "not_in": {
-        const values = c.value;
-        if (values.length === 0) {
-          res = sql`1=1`;
-        } else {
-          const params = options.mapValue ? values.map((v) => options.mapValue!(v, field)) : values;
-          res = sql`${expr} NOT IN (${paramList(params)})`;
-        }
-        break;
-      }
-      default:
-        // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- accessing op for error message
-        throw new Error(`Unsupported operator: ${String((c as Record<string, unknown>)["op"])}`);
-    }
-    results.push(res);
-  }
-
-  return results[0]!;
+    },
+  });
 }
 
 export function where<T>(

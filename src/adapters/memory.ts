@@ -7,6 +7,7 @@ import {
   getPaginationFilter,
   getPrimaryKeyFields,
   getPrimaryKeyValues,
+  walkWhere,
 } from "./utils/common";
 
 type RowData = Record<string, unknown>;
@@ -344,49 +345,34 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     record: RowData,
   ): boolean {
     if (where === undefined) return true;
-    return this.evaluateWhere(where, record);
-  }
-
-  private evaluateWhere<T extends Record<string, unknown>>(
-    where: Where<T>,
-    record: RowData,
-  ): boolean {
-    if ("and" in where) {
-      const and = (where as { and: Where<T>[] }).and;
-      for (let i = 0; i < and.length; i++) {
-        if (!this.evaluateWhere(and[i]!, record)) return false;
-      }
-      return true;
-    }
-    if ("or" in where) {
-      const or = (where as { or: Where<T>[] }).or;
-      for (let i = 0; i < or.length; i++) {
-        if (this.evaluateWhere(or[i]!, record)) return true;
-      }
-      return false;
-    }
-
-    const recordVal = getNestedValue(record, where.field, where.path);
-
-    switch (where.op) {
-      case "eq":
-        return recordVal === where.value;
-      case "ne":
-        return recordVal !== where.value;
-      case "gt":
-        return compareValues(recordVal, where.value) > 0;
-      case "gte":
-        return compareValues(recordVal, where.value) >= 0;
-      case "lt":
-        return compareValues(recordVal, where.value) < 0;
-      case "lte":
-        return compareValues(recordVal, where.value) <= 0;
-      case "in":
-        return Array.isArray(where.value) && where.value.includes(recordVal);
-      case "not_in":
-        return Array.isArray(where.value) && !where.value.includes(recordVal);
-    }
-    return false;
+    return walkWhere<boolean, T>(where, {
+      and: (children) => children.every(Boolean),
+      or: (children) => children.some(Boolean),
+      leaf: (c) => {
+        const recordVal = getNestedValue(record, c.field, c.path);
+        switch (c.op) {
+          case "eq":
+            return recordVal === c.value;
+          case "ne":
+            return recordVal !== c.value;
+          case "gt":
+            return compareValues(recordVal, c.value) > 0;
+          case "gte":
+            return compareValues(recordVal, c.value) >= 0;
+          case "lt":
+            return compareValues(recordVal, c.value) < 0;
+          case "lte":
+            return compareValues(recordVal, c.value) <= 0;
+          case "in":
+            return c.value.includes(recordVal);
+          case "not_in":
+            return !c.value.includes(recordVal);
+          default:
+            // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- accessing op for error message
+            throw new Error(`Unsupported operator: ${String((c as Record<string, unknown>)["op"])}`);
+        }
+      },
+    });
   }
 
   private applySelect<T extends Record<string, unknown>>(record: RowData, select?: Select<T>): T {
@@ -412,7 +398,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     const filtered: RowData[] = [];
     for (let i = 0; i < results.length; i++) {
       const record = results[i]!;
-      if (this.evaluateWhere(paginationWhere, record)) {
+      if (this.matchesWhere(paginationWhere, record)) {
         filtered.push(record);
       }
     }

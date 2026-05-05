@@ -51,7 +51,7 @@ type User = InferModel<typeof schema.users>;
 import { Database } from "bun:sqlite";
 import { SqliteAdapter } from "@8monkey/no-orm/adapters/sqlite";
 
-const db = new Database("data.db");
+const db = new Database("data.db"); // or ":memory:" for an in-process database
 const adapter = new SqliteAdapter(schema, db);
 
 await adapter.migrate();

@@ -1,5 +1,52 @@
 import type { Cursor, FieldName, Model, SortBy, Where } from "../../types";
 
+export type WhereLeaf<T = Record<string, unknown>> = Extract<Where<T>, { field: unknown }>;
+
+export interface WhereVisitor<R, T = Record<string, unknown>> {
+  leaf: (node: WhereLeaf<T>) => R;
+  and: (children: R[]) => R;
+  or: (children: R[]) => R;
+}
+
+/**
+ * Iterative fold over a Where AST. The traversal is backend-agnostic;
+ * adapters supply per-node callbacks that produce their own result type
+ * (Sql fragment, boolean, MongoDB filter object, etc.).
+ */
+export function walkWhere<R, T = Record<string, unknown>>(
+  clause: Where<T>,
+  visitor: WhereVisitor<R, T>,
+): R {
+  const stack: { clause: Where<T>; processed: boolean }[] = [{ clause, processed: false }];
+  const results: R[] = [];
+
+  while (stack.length > 0) {
+    const item = stack.pop()!;
+    const c = item.clause;
+
+    if ("and" in c || "or" in c) {
+      const children = "and" in c ? c.and : c.or;
+
+      if (item.processed) {
+        const parts: R[] = [];
+        for (let i = 0; i < children.length; i++) parts.push(results.pop()!);
+        parts.reverse();
+        results.push("and" in c ? visitor.and(parts) : visitor.or(parts));
+      } else {
+        stack.push({ clause: c, processed: true });
+        for (let i = children.length - 1; i >= 0; i--) {
+          stack.push({ clause: children[i]!, processed: false });
+        }
+      }
+      continue;
+    }
+
+    results.push(visitor.leaf(c));
+  }
+
+  return results[0]!;
+}
+
 // --- Schema & Logic Helpers ---
 
 export function getPrimaryKeyFields(model: Model): string[] {
