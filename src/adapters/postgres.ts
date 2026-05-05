@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type { SQL as BunSQL } from "bun";
 import type { Client as PgClient, Pool as PgPool, PoolClient as PgPoolClient } from "pg";
 import type postgres from "postgres";
@@ -18,12 +20,11 @@ import {
   buildPrimaryKeyFilter,
   getPrimaryKeyFields,
   getPrimaryKeyValues,
+  mapNumeric,
 } from "./utils/common";
 import {
   type QueryExecutor,
   isQueryExecutor,
-  toRow,
-  toDbRow,
   Sql,
   sql,
   raw,
@@ -45,19 +46,46 @@ export type PostgresDriver =
   | TransactionSql
   | BunSQL;
 
-/**
- * Limits the number of prepared statement objects kept in memory to prevent leaks
- * while allowing statement reuse for performance.
- */
-const MAX_CACHED_STATEMENTS = 100;
-
 // --- Internal PG Syntax Helpers ---
 
-const quote = (s: string) => `"${s}"`;
-const ident = (s: string) => raw(quote(s));
-const selectCols = (select?: readonly unknown[]) =>
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Select<T> keys are strings at runtime
-  select ? idList(select as readonly string[], quote) : raw("*");
+const ident = (s: string) => raw(`"${s}"`);
+const selectCols = (select?: readonly string[]) => (select ? idList(select) : raw("*"));
+
+function mapFromRecord<T extends Record<string, unknown>>(
+  model: Model,
+  record: Record<string, unknown>,
+): T {
+  const fields = model.fields;
+  const keys = Object.keys(record);
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i]!;
+    const field = fields[k];
+    if (field?.type === "timestamp" && typeof record[k] === "string") {
+      record[k] = mapNumeric(record[k]);
+    }
+  }
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- mapped fields match the shape of T
+  return record as T;
+}
+
+function mapToRecord(model: Model, data: Record<string, unknown>): Record<string, unknown> {
+  const fields = model.fields;
+  const res: Record<string, unknown> = {};
+  const keys = Object.keys(data);
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i]!;
+    const val = data[k];
+    if (val === undefined) continue;
+    const field = fields[k];
+    // Postgres drivers handle JS objects for jsonb, but json[] often requires stringification
+    if (field?.type === "json[]" && val !== null) {
+      res[k] = JSON.stringify(val);
+    } else {
+      res[k] = val;
+    }
+  }
+  return res;
+}
 
 function sqlType(field: Field): string {
   switch (field.type) {
@@ -110,6 +138,9 @@ function isPg(driver: PostgresDriver): driver is PgClient | PgPool | PgPoolClien
   return "query" in driver;
 }
 
+const isPgPool = (d: PgClient | PgPool | PgPoolClient): d is PgPool =>
+  "connect" in d && !("release" in d);
+
 // --- Executor factories ---
 
 function createPostgresJsExecutor(
@@ -117,16 +148,13 @@ function createPostgresJsExecutor(
   inTransaction = false,
 ): QueryExecutor {
   const runQuery = (query: Sql) => {
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- constructing TemplateStringsArray for driver call
-    const strings = query.strings as string[] & { raw: string[] };
-    strings.raw = query.strings;
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion, typescript-eslint/no-unsafe-return -- calling driver as tagged template function to avoid .unsafe()
+    const [strings, ...params] = query.toTaggedArgs();
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- calling driver as tagged template function to avoid .unsafe()
     const run = driver as (
-      strings: TemplateStringsArray,
-      ...params: unknown[]
+      s: TemplateStringsArray,
+      ...p: unknown[]
     ) => Promise<Record<string, unknown>[]>;
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- TemplateStringsArray is required by the driver's tagged template signature
-    return run(strings as unknown as TemplateStringsArray, ...query.params);
+    return run(strings, ...params);
   };
 
   return {
@@ -138,7 +166,6 @@ function createPostgresJsExecutor(
       return rows[0];
     },
     run: async (query) => {
-      // eslint-disable-next-line typescript-eslint/no-unsafe-assignment -- driver returns result with count/affectedRows
       const rows = await runQuery(query);
       // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- postgres.js returns result with .count
       const r = rows as unknown as { count?: number };
@@ -159,13 +186,8 @@ function createPostgresJsExecutor(
 
 function createBunSqlExecutor(bunSql: BunSQL, inTransaction = false): QueryExecutor {
   const runQuery = (query: Sql) => {
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- constructing TemplateStringsArray for driver call
-    const strings = query.strings as string[] & { raw: string[] };
-    strings.raw = query.strings;
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver call expects TemplateStringsArray
-    return bunSql(strings as unknown as TemplateStringsArray, ...query.params) as Promise<
-      Record<string, unknown>[]
-    >;
+    const [strings, ...params] = query.toTaggedArgs();
+    return bunSql(strings, ...params) as Promise<Record<string, unknown>[]>;
   };
 
   return {
@@ -186,8 +208,7 @@ function createBunSqlExecutor(bunSql: BunSQL, inTransaction = false): QueryExecu
       return { changes };
     },
     transaction: <T>(fn: (executor: QueryExecutor) => Promise<T>) =>
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Bun TransactionSQL extends SQL
-      bunSql.transaction((tx) => fn(createBunSqlExecutor(tx as unknown as BunSQL, true))),
+      bunSql.transaction((tx) => fn(createBunSqlExecutor(tx as BunSQL, true))),
     inTransaction,
   };
 }
@@ -196,9 +217,6 @@ function createPgExecutor(
   driver: PgClient | PgPool | PgPoolClient,
   inTransaction = false,
 ): QueryExecutor {
-  const cache = new Map<string, string>();
-  let statementCount = 0;
-
   function getPrepared(query: Sql) {
     // pg needs a single string with $1, $2 placeholders
     const text = query.strings.reduce(
@@ -207,15 +225,7 @@ function createPgExecutor(
     );
     const values = query.params;
 
-    let name = cache.get(text);
-    if (name === undefined) {
-      if (cache.size >= MAX_CACHED_STATEMENTS) {
-        const first = cache.keys().next();
-        if (first.done !== true) cache.delete(first.value);
-      }
-      name = `q_${statementCount++}`;
-      cache.set(text, name);
-    }
+    const name = `q_${createHash("sha1").update(text).digest("hex").slice(0, 16)}`;
     return { name, text, values };
   }
 
@@ -233,10 +243,8 @@ function createPgExecutor(
       return { changes: res.rowCount ?? 0 };
     },
     transaction: async (fn) => {
-      const isPool = "connect" in driver && !("release" in driver);
-      if (isPool) {
-        // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver is guaranteed to be PgPool by isPool check
-        const client = await (driver as PgPool).connect();
+      if (isPgPool(driver)) {
+        const client = await driver.connect();
         try {
           await client.query("BEGIN");
           const res = await fn(createPgExecutor(client, true));
@@ -298,10 +306,10 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
         const [fieldName, field] = fields[j]!;
         const type = sqlType(field);
         const nullable = field.nullable === true ? "" : " NOT NULL";
-        columnParts.push(`${quote(fieldName)} ${type}${nullable}`);
+        columnParts.push(`"${fieldName}" ${type}${nullable}`);
       }
       const primaryKeyFields = getPrimaryKeyFields(model);
-      const pk = `PRIMARY KEY (${primaryKeyFields.map((f) => quote(f)).join(", ")})`;
+      const pk = `PRIMARY KEY (${primaryKeyFields.map((f) => `"${f}"`).join(", ")})`;
       // eslint-disable-next-line no-await-in-loop -- DDL is intentionally sequential
       await this.executor.run(sql`
         CREATE TABLE IF NOT EXISTS ${ident(name)} (
@@ -319,7 +327,7 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
         const idx = model.indexes[j]!;
         const fields = Array.isArray(idx.field) ? idx.field : [idx.field];
         const formatted = fields.map(
-          (f) => `${quote(f)}${idx.order ? ` ${idx.order.toUpperCase()}` : ""}`,
+          (f) => `"${f}"${idx.order ? ` ${idx.order.toUpperCase()}` : ""}`,
         );
         // eslint-disable-next-line no-await-in-loop -- DDL is intentionally sequential
         await this.executor.run(sql`
@@ -341,18 +349,17 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
   >(args: { model: K; data: T; select?: Select<T> }): Promise<T> {
     const { model: modelName, data, select } = args;
     const model = this.schema[modelName]!;
-    const input = toDbRow(model, data);
+    const input = mapToRecord(model, data);
     const fields = Object.keys(input);
     const query = sql`
-      INSERT INTO ${ident(modelName)} (${idList(fields, quote)})
+      INSERT INTO ${ident(modelName)} (${idList(fields)})
       VALUES (${paramList(fields.map((f) => input[f]))})
       RETURNING ${selectCols(select)}
     `;
 
     const row = await this.executor.get(query);
     if (row === undefined || row === null) throw new Error("Failed to insert record");
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- mapped fields match the shape of T
-    return toRow<T>(model, row, select);
+    return mapFromRecord<T>(model, row);
   }
 
   async find<
@@ -370,8 +377,7 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
 
     const row = await this.executor.get(query);
     if (row === undefined || row === null) return null;
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- select matches model fields at runtime
-    return toRow<T>(model, row, select);
+    return mapFromRecord<T>(model, row);
   }
 
   async findMany<
@@ -407,8 +413,7 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
 
     const result: T[] = [];
     for (let i = 0; i < rows.length; i++) {
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- mapped fields match the shape of T
-      result.push(toRow<T>(model, rows[i]!, select));
+      result.push(mapFromRecord<T>(model, rows[i]!));
     }
     return result;
   }
@@ -423,7 +428,7 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const { model: modelName, data } = args;
     const model = this.schema[modelName]!;
     assertNoPrimaryKeyUpdates(model, data);
-    const input = toDbRow(model, data);
+    const input = mapToRecord(model, data);
     const fields = Object.keys(input);
 
     if (fields.length === 0)
@@ -431,7 +436,7 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
 
     const query = sql`
       UPDATE ${ident(modelName)}
-      SET ${set(input, quote)}
+      SET ${set(input)}
       WHERE ${where(args.where, { model, columnExpr: toColumnExpr })}
       RETURNING *
     `;
@@ -439,8 +444,7 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const row = await this.executor.get(query);
     if (row === undefined || row === null)
       return this.find({ model: modelName, where: args.where });
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- mapped fields match the shape of T
-    return toRow<T>(model, row);
+    return mapFromRecord<T>(model, row);
   }
 
   /**
@@ -453,13 +457,13 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const { model: modelName, data } = args;
     const model = this.schema[modelName]!;
     assertNoPrimaryKeyUpdates(model, data);
-    const input = toDbRow(model, data);
+    const input = mapToRecord(model, data);
     const fields = Object.keys(input);
     if (fields.length === 0) return 0;
 
     const query = sql`
       UPDATE ${ident(modelName)}
-      SET ${set(input, quote)}
+      SET ${set(input)}
       WHERE ${where(args.where, { model, columnExpr: toColumnExpr })}
     `;
 
@@ -488,9 +492,9 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const model = this.schema[modelName]!;
     assertNoPrimaryKeyUpdates(model, updateData);
 
-    const insertRow = toDbRow(model, createData);
+    const insertRow = mapToRecord(model, createData);
     const createFields = Object.keys(insertRow);
-    const updateRow = toDbRow(model, updateData);
+    const updateRow = mapToRecord(model, updateData);
     const updateFields = Object.keys(updateRow);
     const primaryKeyFields = getPrimaryKeyFields(model);
 
@@ -498,23 +502,22 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
       updateFields.length === 0
         ? sql`DO NOTHING`
         : args.where
-          ? sql`DO UPDATE SET ${set(updateRow, quote)} WHERE ${where(args.where, {
+          ? sql`DO UPDATE SET ${set(updateRow)} WHERE ${where(args.where, {
               model,
               columnExpr: toColumnExpr,
             })}`
-          : sql`DO UPDATE SET ${set(updateRow, quote)}`;
+          : sql`DO UPDATE SET ${set(updateRow)}`;
 
     const query = sql`
-      INSERT INTO ${ident(modelName)} (${idList(createFields, quote)})
+      INSERT INTO ${ident(modelName)} (${idList(createFields)})
       VALUES (${paramList(createFields.map((f) => insertRow[f]))})
-      ON CONFLICT (${idList(primaryKeyFields, quote)}) ${action}
+      ON CONFLICT (${idList(primaryKeyFields)}) ${action}
       RETURNING ${selectCols(select)}
     `;
 
     const row = await this.executor.get(query);
     if (row !== undefined && row !== null) {
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- select matches model fields at runtime
-      return toRow<T>(model, row, select);
+      return mapFromRecord<T>(model, row);
     }
 
     const existing = await this.find({

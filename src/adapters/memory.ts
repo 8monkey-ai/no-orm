@@ -98,15 +98,13 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
 
     // Fast path: PK lookup
     const primaryKeyFields = getPrimaryKeyFields(this.schema[model]!);
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- checking for field-based clause
-    const w = where as { field?: string; op?: string; value?: unknown };
     if (
-      w.field !== undefined &&
+      "field" in where &&
       primaryKeyFields.length === 1 &&
-      w.field === primaryKeyFields[0] &&
-      w.op === "eq"
+      where.field === primaryKeyFields[0] &&
+      where.op === "eq"
     ) {
-      const pkValue = String(w.value);
+      const pkValue = String(where.value);
       const row = this.pkIndexes.get(model)!.get(pkValue);
       if (row && this.matchesWhere(where, row)) {
         this.globalLRU.get(row); // Touch for LRU

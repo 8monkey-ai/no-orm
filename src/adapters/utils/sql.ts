@@ -1,5 +1,5 @@
-import type { Cursor, Field, Model, Select, SortBy, Where } from "../../types";
-import { getPaginationFilter, mapNumeric } from "./common";
+import type { Cursor, Field, Model, SortBy, Where } from "../../types";
+import { getPaginationFilter } from "./common";
 
 /**
  * A Sql instance keeps SQL logic and dynamic data separate to prevent injection.
@@ -10,6 +10,18 @@ export class Sql {
     readonly strings: string[],
     readonly params: unknown[],
   ) {}
+
+  /**
+   * Augments the strings array with a .raw property for drivers that expect TemplateStringsArray.
+   * This is required for safe driver calls that use tagged templates (e.g. postgres.js, Bun SQL).
+   */
+  toTaggedArgs(): [TemplateStringsArray, ...unknown[]] {
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- augmenting array to satisfy TemplateStringsArray contract
+    const strings = this.strings as string[] & { raw: readonly string[] };
+    // eslint-disable-next-line typescript-eslint/no-unnecessary-condition -- raw may be missing if not already augmented
+    strings.raw ??= this.strings;
+    return [strings as TemplateStringsArray, ...this.params];
+  }
 }
 
 /**
@@ -50,8 +62,8 @@ export function sql(strings: TemplateStringsArray, ...values: unknown[]): Sql {
 /**
  * Joins multiple identifiers with a separator.
  */
-export function idList(names: readonly string[], quote: (s: string) => string): Sql {
-  return new Sql([names.map((n) => quote(n)).join(", ")], []);
+export function idList(names: readonly string[], quoteChar: string = '"'): Sql {
+  return new Sql([names.map((n) => `${quoteChar}${n}${quoteChar}`).join(", ")], []);
 }
 
 /**
@@ -87,88 +99,13 @@ export function isQueryExecutor(obj: unknown): obj is QueryExecutor {
 }
 
 /**
- * Maps a raw database row to the inferred model type T.
- * Handles JSON parsing, boolean conversion, and numeric mapping.
- */
-export function toRow<T extends Record<string, unknown>>(
-  model: Model,
-  row: Record<string, unknown>,
-  select?: Select<T>,
-): T {
-  const fields = model.fields;
-  const res: Record<string, unknown> = {};
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- select fields are strings
-  const keys = (select as readonly string[]) ?? Object.keys(row);
-
-  for (let i = 0; i < keys.length; i++) {
-    const k = keys[i]!;
-    const val = row[k];
-    const field = fields[k];
-    if (field === undefined || val === undefined || val === null) {
-      res[k] = val;
-      continue;
-    }
-    if (field.type === "json" || field.type === "json[]") {
-      res[k] = typeof val === "string" ? JSON.parse(val) : val;
-    } else if (field.type === "boolean") {
-      // Postgres returns boolean, SQLite returns 1/0
-      res[k] = val === true || val === 1;
-    } else if (field.type === "number" || field.type === "timestamp") {
-      res[k] = mapNumeric(val);
-    } else {
-      res[k] = val;
-    }
-  }
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- mapped fields match the shape of T
-  return res as T;
-}
-
-/**
- * Prepares a data object for database insertion/update.
- * Handles JSON stringification and optional adapter-specific mapping.
- */
-export function toDbRow(
-  model: Model,
-  data: Record<string, unknown>,
-  mapValue?: (val: unknown, field: Field) => unknown,
-): Record<string, unknown> {
-  const fields = model.fields;
-  const res: Record<string, unknown> = {};
-  const keys = Object.keys(data);
-  for (let i = 0; i < keys.length; i++) {
-    const k = keys[i]!;
-    const val = data[k];
-    const field = fields[k];
-    if (val === undefined) continue;
-
-    if (val === null) {
-      res[k] = null;
-      continue;
-    }
-
-    if (field === undefined) {
-      res[k] = val;
-      continue;
-    }
-
-    let processed = val;
-    if (field.type === "json" || field.type === "json[]") {
-      processed = JSON.stringify(val);
-    }
-
-    res[k] = mapValue ? mapValue(processed, field) : processed;
-  }
-  return res;
-}
-
-/**
  * Concatenates multiple Sql fragments with a separator.
  */
 export function join(fragments: Sql[], separator: string): Sql {
   if (fragments.length === 0) return new Sql([""], []);
 
-  const strings = [...fragments[0]!.strings];
-  const params = [...fragments[0]!.params];
+  const strings = fragments[0]!.strings.slice();
+  const params = fragments[0]!.params.slice();
 
   for (let i = 1; i < fragments.length; i++) {
     const f = fragments[i]!;
@@ -184,7 +121,12 @@ export function join(fragments: Sql[], separator: string): Sql {
   return new Sql(strings, params);
 }
 
-export type ColumnExprFn = (model: Model, fieldName: string, path?: string[], value?: unknown) => Sql;
+export type ColumnExprFn = (
+  model: Model,
+  fieldName: string,
+  path?: string[],
+  value?: unknown,
+) => Sql;
 export type MapValueFn = (val: unknown, field?: Field) => unknown;
 
 export interface WhereOptions {
@@ -198,7 +140,6 @@ function buildWhere<T>(clause: Where<T>, options: WhereOptions): Sql {
   const results: Sql[] = [];
 
   while (stack.length > 0) {
-    // eslint-disable-next-line typescript-eslint/no-non-null-assertion -- stack length checked
     const item = stack.pop()!;
     const c = item.clause;
 
@@ -212,7 +153,6 @@ function buildWhere<T>(clause: Where<T>, options: WhereOptions): Sql {
         const op = "and" in c ? " AND " : " OR ";
         const parts: Sql[] = [];
         for (let i = 0; i < children.length; i++) {
-          // eslint-disable-next-line typescript-eslint/no-non-null-assertion -- results match children count
           parts.push(sql`(${results.pop()!})`);
         }
         // Parts were popped in reverse order, restore original order for deterministic SQL
@@ -222,7 +162,6 @@ function buildWhere<T>(clause: Where<T>, options: WhereOptions): Sql {
         // First pass: Push self back as 'processed', then push children to be processed.
         stack.push({ clause: c, processed: true });
         for (let i = children.length - 1; i >= 0; i--) {
-          // eslint-disable-next-line typescript-eslint/no-non-null-assertion -- children is a valid array
           stack.push({ clause: children[i]!, processed: false });
         }
       }
@@ -256,9 +195,8 @@ function buildWhere<T>(clause: Where<T>, options: WhereOptions): Sql {
         res = sql`${expr} <= ${mapped}`;
         break;
       case "in": {
-        // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val cast to unknown array for in operator
-        const values = val as unknown[];
-        if (!Array.isArray(values) || values.length === 0) {
+        const values = c.value;
+        if (values.length === 0) {
           res = sql`1=0`;
         } else {
           const params = options.mapValue ? values.map((v) => options.mapValue!(v, field)) : values;
@@ -267,9 +205,8 @@ function buildWhere<T>(clause: Where<T>, options: WhereOptions): Sql {
         break;
       }
       case "not_in": {
-        // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val cast to unknown array for not_in operator
-        const values = val as unknown[];
-        if (!Array.isArray(values) || values.length === 0) {
+        const values = c.value;
+        if (values.length === 0) {
           res = sql`1=1`;
         } else {
           const params = options.mapValue ? values.map((v) => options.mapValue!(v, field)) : values;
@@ -284,7 +221,6 @@ function buildWhere<T>(clause: Where<T>, options: WhereOptions): Sql {
     results.push(res);
   }
 
-  // eslint-disable-next-line typescript-eslint/no-non-null-assertion -- final result is always present
   return results[0]!;
 }
 
@@ -311,13 +247,13 @@ export function where<T>(
 /**
  * Prepares a SET clause for UPDATE or UPSERT.
  */
-export function set(data: Record<string, unknown>, quote: (s: string) => string): Sql {
+export function set(data: Record<string, unknown>, quoteChar: string = '"'): Sql {
   const fields = Object.keys(data);
   if (fields.length === 0) throw new Error("set() called with empty data");
   const parts: Sql[] = [];
   for (let i = 0; i < fields.length; i++) {
     const f = fields[i]!;
-    parts.push(sql`${raw(quote(f))} = ${data[f]}`);
+    parts.push(sql`${raw(`${quoteChar}${f}${quoteChar}`)} = ${data[f]}`);
   }
   return join(parts, ", ");
 }

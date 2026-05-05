@@ -19,12 +19,11 @@ import {
   buildPrimaryKeyFilter,
   getPrimaryKeyFields,
   getPrimaryKeyValues,
+  mapNumeric,
 } from "./utils/common";
 import {
   type QueryExecutor,
   isQueryExecutor,
-  toRow,
-  toDbRow,
   Sql,
   sql,
   raw,
@@ -45,19 +44,67 @@ const MAX_CACHED_STATEMENTS = 100;
 
 // --- Internal SQLite Syntax Helpers ---
 
-const quote = (s: string) => `"${s}"`;
-const ident = (s: string) => raw(quote(s));
-const selectCols = (select?: readonly unknown[]) =>
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Select<T> keys are strings at runtime
-  select ? idList(select as readonly string[], quote) : raw("*");
+const ident = (s: string) => raw(`"${s}"`);
+const selectCols = (select?: readonly string[]) => (select ? idList(select) : raw("*"));
 
 const mapSqliteValue = (val: unknown, field?: Field) => {
-
   if (field?.type === "boolean" || (field === undefined && typeof val === "boolean")) {
     return val === true ? 1 : 0;
   }
   return val;
 };
+
+function mapFromRecord<T extends Record<string, unknown>>(
+  model: Model,
+  record: Record<string, unknown>,
+): T {
+  const fields = model.fields;
+  const keys = Object.keys(record);
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i]!;
+    const field = fields[k];
+    if (field === undefined || record[k] === null || record[k] === undefined) continue;
+
+    if (field.type === "json" || field.type === "json[]") {
+      record[k] = typeof record[k] === "string" ? JSON.parse(record[k]) : record[k];
+    } else if (field.type === "boolean") {
+      record[k] = record[k] === 1 || record[k] === true;
+    } else if (field.type === "number" || field.type === "timestamp") {
+      record[k] = mapNumeric(record[k]);
+    }
+  }
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- mapped fields match the shape of T
+  return record as T;
+}
+
+function mapToRecord(model: Model, data: Record<string, unknown>): Record<string, unknown> {
+  const fields = model.fields;
+  const res: Record<string, unknown> = {};
+  const keys = Object.keys(data);
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i]!;
+    const val = data[k];
+    if (val === undefined) continue;
+    if (val === null) {
+      res[k] = null;
+      continue;
+    }
+    const field = fields[k];
+    if (field === undefined) {
+      res[k] = val;
+      continue;
+    }
+
+    let processed = val;
+    if (field.type === "json" || field.type === "json[]") {
+      processed = JSON.stringify(val);
+    } else if (field.type === "boolean") {
+      processed = val === true ? 1 : 0;
+    }
+    res[k] = processed;
+  }
+  return res;
+}
 
 function sqlType(field: Field): string {
   switch (field.type) {
@@ -148,8 +195,10 @@ function createSyncSqliteExecutor(driver: SyncDriver, inTransaction = false): Qu
     get: (query: Sql) => {
       const { strings, params } = query;
       const sqlStr = strings.join("?");
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver returns either a row object or undefined
-      return Promise.resolve(getPrepared(sqlStr).get(...params) as Record<string, unknown> | undefined);
+      return Promise.resolve(
+        // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver returns either a row object or undefined
+        getPrepared(sqlStr).get(...params) as Record<string, unknown> | undefined,
+      );
     },
     run: (query: Sql) => {
       const { strings, params } = query;
@@ -198,10 +247,9 @@ function createAsyncSqliteExecutor(driver: SqliteDatabase, inTransaction = false
 }
 
 function createSqliteExecutor(driver: SqliteDriver): QueryExecutor {
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver is structurally checked in isSyncSqlite
-  if (isSyncSqlite(driver)) return createSyncSqliteExecutor(driver as unknown as SyncDriver);
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver is structurally checked
-  return createAsyncSqliteExecutor(driver as SqliteDatabase);
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- bridges narrowed driver type to internal structural SyncDriver shape
+  if (isSyncSqlite(driver)) return createSyncSqliteExecutor(driver as SyncDriver);
+  return createAsyncSqliteExecutor(driver);
 }
 
 // --- Adapter ---
@@ -228,11 +276,10 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
       const [name, model] = models[i]!;
       const fields = Object.entries(model.fields);
       const columns = fields.map(
-        ([fname, f]) =>
-          `${quote(fname)} ${sqlType(f)}${f.nullable === true ? "" : " NOT NULL"}`,
+        ([fname, f]) => `"${fname}" ${sqlType(f)}${f.nullable === true ? "" : " NOT NULL"}`,
       );
       const primaryKeyFields = getPrimaryKeyFields(model);
-      const pk = `PRIMARY KEY (${primaryKeyFields.map((f) => quote(f)).join(", ")})`;
+      const pk = `PRIMARY KEY (${primaryKeyFields.map((f) => `"${f}"`).join(", ")})`;
       // eslint-disable-next-line no-await-in-loop -- DDL is intentionally sequential
       await this.executor.run(sql`
         CREATE TABLE IF NOT EXISTS ${ident(name)} (
@@ -250,7 +297,7 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
         const idx = model.indexes[j]!;
         const fields = Array.isArray(idx.field) ? idx.field : [idx.field];
         const formatted = fields.map(
-          (f) => `${quote(f)}${idx.order ? ` ${idx.order.toUpperCase()}` : ""}`,
+          (f) => `"${f}"${idx.order ? ` ${idx.order.toUpperCase()}` : ""}`,
         );
         // eslint-disable-next-line no-await-in-loop -- DDL is intentionally sequential
         await this.executor.run(sql`
@@ -272,10 +319,10 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
   >(args: { model: K; data: T; select?: Select<T> }): Promise<T> {
     const { model: modelName, data, select } = args;
     const model = this.schema[modelName]!;
-    const input = toDbRow(model, data, mapSqliteValue);
+    const input = mapToRecord(model, data);
     const fields = Object.keys(input);
     const query = sql`
-      INSERT INTO ${ident(modelName)} (${idList(fields, quote)})
+      INSERT INTO ${ident(modelName)} (${idList(fields)})
       VALUES (${paramList(fields.map((f) => input[f]))})
       RETURNING ${selectCols(select)}
     `;
@@ -290,8 +337,7 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
       if (!res) throw new Error("Failed to insert record");
       return res;
     }
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- mapped fields match the shape of T
-    return toRow<T>(model, row, select);
+    return mapFromRecord<T>(model, row);
   }
 
   async find<
@@ -309,8 +355,7 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
 
     const row = await this.executor.get(query);
     if (row === undefined || row === null) return null;
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- select matches model fields at runtime
-    return toRow<T>(model, row, select);
+    return mapFromRecord<T>(model, row);
   }
 
   async findMany<
@@ -352,8 +397,7 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
 
     const result: T[] = [];
     for (let i = 0; i < rows.length; i++) {
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- mapped fields match the shape of T
-      result.push(toRow<T>(model, rows[i]!, select));
+      result.push(mapFromRecord<T>(model, rows[i]!));
     }
     return result;
   }
@@ -368,7 +412,7 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     const { model: modelName, data } = args;
     const model = this.schema[modelName]!;
     assertNoPrimaryKeyUpdates(model, data);
-    const input = toDbRow(model, data, mapSqliteValue);
+    const input = mapToRecord(model, data);
     const fields = Object.keys(input);
 
     if (fields.length === 0)
@@ -376,7 +420,7 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
 
     const query = sql`
       UPDATE ${ident(modelName)}
-      SET ${set(input, quote)}
+      SET ${set(input)}
       WHERE ${where(args.where, { model, columnExpr: toColumnExpr, mapValue: mapSqliteValue })}
       RETURNING *
     `;
@@ -384,8 +428,7 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     const row = await this.executor.get(query);
     if (row === undefined || row === null)
       return this.find({ model: modelName, where: args.where });
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- mapped fields match the shape of T
-    return toRow<T>(model, row);
+    return mapFromRecord<T>(model, row);
   }
 
   /**
@@ -398,13 +441,13 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     const { model: modelName, data } = args;
     const model = this.schema[modelName]!;
     assertNoPrimaryKeyUpdates(model, data);
-    const input = toDbRow(model, data, mapSqliteValue);
+    const input = mapToRecord(model, data);
     const fields = Object.keys(input);
     if (fields.length === 0) return 0;
 
     const query = sql`
       UPDATE ${ident(modelName)}
-      SET ${set(input, quote)}
+      SET ${set(input)}
       WHERE ${where(args.where, { model, columnExpr: toColumnExpr, mapValue: mapSqliteValue })}
     `;
 
@@ -433,9 +476,9 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     const model = this.schema[modelName]!;
     assertNoPrimaryKeyUpdates(model, updateData);
 
-    const insertRow = toDbRow(model, createData, mapSqliteValue);
+    const insertRow = mapToRecord(model, createData);
     const createFields = Object.keys(insertRow);
-    const updateRow = toDbRow(model, updateData, mapSqliteValue);
+    const updateRow = mapToRecord(model, updateData);
     const updateFields = Object.keys(updateRow);
     const primaryKeyFields = getPrimaryKeyFields(model);
 
@@ -443,24 +486,23 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
       updateFields.length === 0
         ? sql`DO NOTHING`
         : args.where
-          ? sql`DO UPDATE SET ${set(updateRow, quote)} WHERE ${where(args.where, {
+          ? sql`DO UPDATE SET ${set(updateRow)} WHERE ${where(args.where, {
               model,
               columnExpr: toColumnExpr,
               mapValue: mapSqliteValue,
             })}`
-          : sql`DO UPDATE SET ${set(updateRow, quote)}`;
+          : sql`DO UPDATE SET ${set(updateRow)}`;
 
     const query = sql`
-      INSERT INTO ${ident(modelName)} (${idList(createFields, quote)})
+      INSERT INTO ${ident(modelName)} (${idList(createFields)})
       VALUES (${paramList(createFields.map((f) => insertRow[f]))})
-      ON CONFLICT (${idList(primaryKeyFields, quote)}) ${action}
+      ON CONFLICT (${idList(primaryKeyFields)}) ${action}
       RETURNING ${selectCols(select)}
     `;
 
     const row = await this.executor.get(query);
     if (row !== undefined && row !== null) {
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- select matches model fields at runtime
-      return toRow<T>(model, row, select);
+      return mapFromRecord<T>(model, row);
     }
 
     const existing = await this.find({
