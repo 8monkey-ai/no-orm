@@ -25,9 +25,11 @@ import {
   isQueryExecutor,
   toRow,
   toDbRow,
-  type Fragment,
-  join,
-  wrap,
+  Sql,
+  sql,
+  raw,
+  idList,
+  paramList,
   where,
   set,
   sort,
@@ -44,8 +46,13 @@ const MAX_CACHED_STATEMENTS = 100;
 // --- Internal SQLite Syntax Helpers ---
 
 const quote = (s: string) => `"${s}"`;
+const id = (s: string) => raw(quote(s));
+const selectCols = (select?: readonly unknown[]) =>
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Select<T> keys are strings at runtime
+  select ? idList(select as readonly string[], quote) : raw("*");
 
 const mapSqliteValue = (val: unknown, spec?: Field) => {
+
   if (spec?.type === "boolean" || (spec === undefined && typeof val === "boolean")) {
     return val === true ? 1 : 0;
   }
@@ -90,14 +97,13 @@ function serializeJsonPath(path: string[]): string {
   return jsonPath;
 }
 
-function toColumnExpr(model: Model, fieldName: string, path?: string[]): Fragment {
-  const quoted = quote(fieldName);
-  if (!path || path.length === 0) return { strings: [quoted], params: [] };
+function toColumnExpr(model: Model, fieldName: string, path?: string[]): Sql {
+  if (!path || path.length === 0) return id(fieldName);
   const field = model.fields[fieldName];
   if (field?.type !== "json" && field?.type !== "json[]") {
     throw new Error(`Cannot use JSON path on non-JSON field: ${fieldName}`);
   }
-  return { strings: [`json_extract(${quoted}, ?)`], params: [serializeJsonPath(path)] };
+  return sql`json_extract(${id(fieldName)}, ${serializeJsonPath(path)})`;
 }
 
 // --- Driver detection and executors ---
@@ -119,36 +125,36 @@ interface SyncDriver {
 function createSyncSqliteExecutor(driver: SyncDriver, inTransaction = false): QueryExecutor {
   const cache = new Map<string, SyncStatement>();
 
-  function getStmt(sql: string): SyncStatement {
-    let stmt = cache.get(sql);
+  function getStmt(sqlStr: string): SyncStatement {
+    let stmt = cache.get(sqlStr);
     if (stmt === undefined) {
       if (cache.size >= MAX_CACHED_STATEMENTS) {
         const first = cache.keys().next();
         if (first.done !== true) cache.delete(first.value);
       }
-      stmt = driver.prepare(sql);
-      cache.set(sql, stmt);
+      stmt = driver.prepare(sqlStr);
+      cache.set(sqlStr, stmt);
     }
     return stmt;
   }
 
   return {
-    all: (query) => {
+    all: (query: Sql) => {
       const { strings, params } = query;
-      const sql = strings.join("?");
+      const sqlStr = strings.join("?");
       // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver result row matches Record shape
-      return Promise.resolve(getStmt(sql).all(...params) as Record<string, unknown>[]);
+      return Promise.resolve(getStmt(sqlStr).all(...params) as Record<string, unknown>[]);
     },
-    get: (query) => {
+    get: (query: Sql) => {
       const { strings, params } = query;
-      const sql = strings.join("?");
+      const sqlStr = strings.join("?");
       // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver returns either a row object or undefined
-      return Promise.resolve(getStmt(sql).get(...params) as Record<string, unknown> | undefined);
+      return Promise.resolve(getStmt(sqlStr).get(...params) as Record<string, unknown> | undefined);
     },
-    run: (query) => {
+    run: (query: Sql) => {
       const { strings, params } = query;
-      const sql = strings.join("?");
-      const res = getStmt(sql).run(...params);
+      const sqlStr = strings.join("?");
+      const res = getStmt(sqlStr).run(...params);
       return Promise.resolve({ changes: res.changes });
     },
     transaction: async (fn) => {
@@ -169,10 +175,10 @@ function createSyncSqliteExecutor(driver: SyncDriver, inTransaction = false): Qu
 function createAsyncSqliteExecutor(driver: SqliteDatabase, inTransaction = false): QueryExecutor {
   return {
     // eslint-disable-next-line typescript-eslint/no-unsafe-return -- async driver returns rows
-    all: (query) => driver.all(query.strings.join("?"), query.params),
+    all: (query: Sql) => driver.all(query.strings.join("?"), query.params),
     // eslint-disable-next-line typescript-eslint/no-unsafe-return -- async driver returns row
-    get: (query) => driver.get(query.strings.join("?"), query.params),
-    run: async (query) => {
+    get: (query: Sql) => driver.get(query.strings.join("?"), query.params),
+    run: async (query: Sql) => {
       const res = await driver.run(query.strings.join("?"), query.params);
       return { changes: res.changes ?? 0 };
     },
@@ -213,7 +219,7 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     this.executor = isQueryExecutor(driver) ? driver : createSqliteExecutor(driver);
   }
 
-  private getOptions(model: Model) {
+  private ctx(model: Model) {
     return {
       model,
       columnExpr: (f: string, p?: string[]) => toColumnExpr(model, f, p),
@@ -236,10 +242,12 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
       const primaryKeyFields = getPrimaryKeyFields(model);
       const pk = `PRIMARY KEY (${primaryKeyFields.map((f) => quote(f)).join(", ")})`;
       // eslint-disable-next-line no-await-in-loop -- DDL is intentionally sequential
-      await this.executor.run({
-        strings: [`CREATE TABLE IF NOT EXISTS ${quote(name)} (${columns.join(", ")}, ${pk})`],
-        params: [],
-      });
+      await this.executor.run(sql`
+        CREATE TABLE IF NOT EXISTS ${id(name)} (
+          ${raw(columns.join(", "))},
+          ${raw(pk)}
+        )
+      `);
     }
 
     // Now create indexes
@@ -253,12 +261,10 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
           (f) => `${quote(f)}${idx.order ? ` ${idx.order.toUpperCase()}` : ""}`,
         );
         // eslint-disable-next-line no-await-in-loop -- DDL is intentionally sequential
-        await this.executor.run({
-          strings: [
-            `CREATE INDEX IF NOT EXISTS ${quote(`idx_${name}_${j}`)} ON ${quote(name)} (${formatted.join(", ")})`,
-          ],
-          params: [],
-        });
+        await this.executor.run(sql`
+          CREATE INDEX IF NOT EXISTS ${id(`idx_${name}_${j}`)}
+          ON ${id(name)} (${raw(formatted.join(", "))})
+        `);
       }
     }
   }
@@ -276,15 +282,13 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     const model = this.schema[modelName]!;
     const input = toDbRow(model, data, mapSqliteValue);
     const fields = Object.keys(input);
-    const sqlFields = fields.map((f) => quote(f)).join(", ");
-    const sqlSelect = select ? select.map((s) => quote(s)).join(", ") : "*";
+    const query = sql`
+      INSERT INTO ${id(modelName)} (${idList(fields, quote)})
+      VALUES (${paramList(fields.map((f) => input[f]))})
+      RETURNING ${selectCols(select)}
+    `;
 
-    const strings = [`INSERT INTO ${quote(modelName)} (${sqlFields}) VALUES (`];
-    for (let i = 1; i < fields.length; i++) strings.push(", ");
-    strings.push(`) RETURNING ${sqlSelect}`);
-    const params = fields.map((f) => input[f]);
-
-    const row = await this.executor.get({ strings, params });
+    const row = await this.executor.get(query);
     if (row === undefined || row === null) {
       const res = await this.find({
         model: modelName,
@@ -304,10 +308,12 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
   >(args: { model: K; where: Where<T>; select?: Select<T> }): Promise<T | null> {
     const { model: modelName, select } = args;
     const model = this.schema[modelName]!;
-    const built = where(args.where, this.getOptions(model));
-    const sqlSelect = select ? select.map((s) => quote(s)).join(", ") : "*";
-
-    const query = wrap(built, `SELECT ${sqlSelect} FROM ${quote(modelName)} WHERE `, " LIMIT 1");
+    const query = sql`
+      SELECT ${selectCols(select)}
+      FROM ${id(modelName)}
+      WHERE ${where(args.where, this.ctx(model))}
+      LIMIT 1
+    `;
 
     const row = await this.executor.get(query);
     if (row === undefined || row === null) return null;
@@ -329,24 +335,21 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
   }): Promise<T[]> {
     const { model: modelName, select, sortBy, limit, offset, cursor } = args;
     const model = this.schema[modelName]!;
-    const opts = this.getOptions(model);
-    const built = where(args.where, Object.assign({}, opts, { cursor, sortBy }));
-    const sqlSelect = select ? select.map((s) => quote(s)).join(", ") : "*";
-
-    let query = wrap(built, `SELECT ${sqlSelect} FROM ${quote(modelName)} WHERE `, "");
+    const opts = this.ctx(model);
+    let query = sql`
+      SELECT ${selectCols(select)}
+      FROM ${id(modelName)}
+      WHERE ${where(args.where, Object.assign({}, opts, { cursor, sortBy }))}
+    `;
 
     if (sortBy && sortBy.length > 0) {
-      query = join([query, sort(sortBy, opts.columnExpr)], " ORDER BY ");
+      query = sql`${query} ORDER BY ${sort(sortBy, opts.columnExpr)}`;
     }
     if (limit !== undefined) {
-      query.strings[query.strings.length - 1] += " LIMIT ";
-      query.strings.push("");
-      query.params.push(limit);
+      query = sql`${query} LIMIT ${limit}`;
     }
     if (offset !== undefined) {
-      query.strings[query.strings.length - 1] += " OFFSET ";
-      query.strings.push("");
-      query.params.push(offset);
+      query = sql`${query} OFFSET ${offset}`;
     }
     const rows = await this.executor.all(query);
 
@@ -374,13 +377,12 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     if (fields.length === 0)
       return this.find({ model: modelName, where: args.where, select: undefined });
 
-    const setFrag = set(input, quote);
-    const whereFrag = where(args.where, this.getOptions(model));
-    const query = join(
-      [wrap(setFrag, `UPDATE ${quote(modelName)} SET `, ""), whereFrag],
-      " WHERE ",
-    );
-    query.strings[query.strings.length - 1] += " RETURNING *";
+    const query = sql`
+      UPDATE ${id(modelName)}
+      SET ${set(input, quote)}
+      WHERE ${where(args.where, this.ctx(model))}
+      RETURNING *
+    `;
 
     const row = await this.executor.get(query);
     if (row === undefined || row === null)
@@ -403,12 +405,11 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     const fields = Object.keys(input);
     if (fields.length === 0) return 0;
 
-    const setFrag = set(input, quote);
-    const whereFrag = where(args.where, this.getOptions(model));
-    const query = join(
-      [wrap(setFrag, `UPDATE ${quote(modelName)} SET `, ""), whereFrag],
-      " WHERE ",
-    );
+    const query = sql`
+      UPDATE ${id(modelName)}
+      SET ${set(input, quote)}
+      WHERE ${where(args.where, this.ctx(model))}
+    `;
 
     const res = await this.executor.run(query);
     return res.changes;
@@ -441,36 +442,19 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     const uFields = Object.keys(updateRow);
     const primaryKeyFields = getPrimaryKeyFields(model);
 
-    const sqlFields = cFields.map((f) => quote(f)).join(", ");
-    const sqlConflict = primaryKeyFields.map((f) => quote(f)).join(", ");
+    const action =
+      uFields.length === 0
+        ? sql`DO NOTHING`
+        : args.where
+          ? sql`DO UPDATE SET ${set(updateRow, quote)} WHERE ${where(args.where, this.ctx(model))}`
+          : sql`DO UPDATE SET ${set(updateRow, quote)}`;
 
-    const strings = [`INSERT INTO ${quote(modelName)} (${sqlFields}) VALUES (`];
-    const params = [];
-
-    for (let i = 0; i < cFields.length; i++) {
-      if (i > 0) strings.push(", ");
-      params.push(insertRow[cFields[i]!]);
-    }
-    strings.push(`) ON CONFLICT (${sqlConflict}) `);
-
-    let query: Fragment = { strings, params };
-
-    if (uFields.length > 0) {
-      const setFrag = set(updateRow, quote);
-      query.strings[query.strings.length - 1] += "DO UPDATE SET ";
-      query = join([query, setFrag], "");
-
-      if (args.where) {
-        const built = where(args.where, this.getOptions(model));
-        query.strings[query.strings.length - 1] += " WHERE ";
-        query = join([query, built], "");
-      }
-    } else {
-      query.strings[query.strings.length - 1] += "DO NOTHING";
-    }
-
-    const sqlSelect = select ? select.map((s) => quote(s)).join(", ") : "*";
-    query.strings[query.strings.length - 1] += ` RETURNING ${sqlSelect}`;
+    const query = sql`
+      INSERT INTO ${id(modelName)} (${idList(cFields, quote)})
+      VALUES (${paramList(cFields.map((f) => insertRow[f]))})
+      ON CONFLICT (${idList(primaryKeyFields, quote)}) ${action}
+      RETURNING ${selectCols(select)}
+    `;
 
     const row = await this.executor.get(query);
     if (row !== undefined && row !== null) {
@@ -493,8 +477,10 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
   >(args: { model: K; where: Where<T> }): Promise<void> {
     const { model: modelName } = args;
     const model = this.schema[modelName]!;
-    const built = where(args.where, this.getOptions(model));
-    const query = wrap(built, `DELETE FROM ${quote(modelName)} WHERE `, "");
+    const query = sql`
+      DELETE FROM ${id(modelName)}
+      WHERE ${where(args.where, this.ctx(model))}
+    `;
     await this.executor.run(query);
   }
 
@@ -504,8 +490,10 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
   >(args: { model: K; where?: Where<T> }): Promise<number> {
     const { model: modelName } = args;
     const model = this.schema[modelName]!;
-    const built = where(args.where, this.getOptions(model));
-    const query = wrap(built, `DELETE FROM ${quote(modelName)} WHERE `, "");
+    const query = sql`
+      DELETE FROM ${id(modelName)}
+      WHERE ${where(args.where, this.ctx(model))}
+    `;
     const res = await this.executor.run(query);
     return res.changes;
   }
@@ -516,8 +504,11 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
   >(args: { model: K; where?: Where<T> }): Promise<number> {
     const { model: modelName } = args;
     const model = this.schema[modelName]!;
-    const built = where(args.where, this.getOptions(model));
-    const query = wrap(built, `SELECT COUNT(*) as count FROM ${quote(modelName)} WHERE `, "");
+    const query = sql`
+      SELECT COUNT(*) as count
+      FROM ${id(modelName)}
+      WHERE ${where(args.where, this.ctx(model))}
+    `;
     const row = await this.executor.get(query);
     return Number(row?.["count"] ?? 0);
   }

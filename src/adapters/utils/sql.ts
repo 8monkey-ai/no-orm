@@ -2,19 +2,76 @@ import type { Cursor, Field, Model, Select, SortBy, Where } from "../../types";
 import { getPaginationFilter, mapNumeric } from "./common";
 
 /**
- * A Fragment keeps SQL logic and dynamic data separate to prevent injection.
+ * A Sql instance keeps SQL logic and dynamic data separate to prevent injection.
  * It is structured to be compatible with TemplateStringsArray for safe driver calls.
  */
-export interface Fragment {
-  strings: string[];
-  params: unknown[];
+export class Sql {
+  constructor(
+    readonly strings: string[],
+    readonly params: unknown[],
+  ) {}
+}
+
+/**
+ * Raw text to be included directly in SQL without parameterization.
+ * Returns a Sql instance with no parameters.
+ */
+export const raw = (s: string) => new Sql([s], []);
+
+/**
+ * Tagged template literal for building SQL fragments safely.
+ * Nesting Sql instances is supported.
+ */
+export function sql(strings: TemplateStringsArray, ...values: unknown[]): Sql {
+  const outStrings = [strings[0]!];
+  const outParams: unknown[] = [];
+
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    const tail = strings[i + 1]!;
+
+    if (v instanceof Sql) {
+      outStrings[outStrings.length - 1] += v.strings[0]!;
+      for (let j = 1; j < v.strings.length; j++) {
+        outStrings.push(v.strings[j]!);
+      }
+      for (let j = 0; j < v.params.length; j++) {
+        outParams.push(v.params[j]);
+      }
+      outStrings[outStrings.length - 1] += tail;
+    } else {
+      outParams.push(v);
+      outStrings.push(tail);
+    }
+  }
+  return new Sql(outStrings, outParams);
+}
+
+/**
+ * Joins multiple identifiers with a separator.
+ */
+export function idList(names: readonly string[], quote: (s: string) => string): Sql {
+  return new Sql([names.map((n) => quote(n)).join(", ")], []);
+}
+
+/**
+ * Generates a comma-separated list of placeholders for values.
+ */
+export function paramList(values: unknown[]): Sql {
+  if (values.length === 0) return new Sql([""], []);
+  const strings: string[] = [""];
+  for (let i = 1; i < values.length; i++) {
+    strings.push(", ");
+  }
+  strings.push("");
+  return new Sql(strings, values);
 }
 
 /** Shared contracts for SQL executors */
 export interface QueryExecutor {
-  all(query: Fragment): Promise<Record<string, unknown>[]>;
-  get(query: Fragment): Promise<Record<string, unknown> | undefined | null>;
-  run(query: Fragment): Promise<{ changes: number }>;
+  all(query: Sql): Promise<Record<string, unknown>[]>;
+  get(query: Sql): Promise<Record<string, unknown> | undefined | null>;
+  run(query: Sql): Promise<{ changes: number }>;
   transaction<T>(fn: (executor: QueryExecutor) => Promise<T>): Promise<T>;
   readonly inTransaction: boolean;
 }
@@ -105,10 +162,10 @@ export function toDbRow(
 }
 
 /**
- * Concatenates multiple fragments with a separator.
+ * Concatenates multiple Sql fragments with a separator.
  */
-export function join(fragments: Fragment[], separator: string): Fragment {
-  if (fragments.length === 0) return { strings: [""], params: [] };
+export function join(fragments: Sql[], separator: string): Sql {
+  if (fragments.length === 0) return new Sql([""], []);
 
   const strings = [...fragments[0]!.strings];
   const params = [...fragments[0]!.params];
@@ -124,20 +181,10 @@ export function join(fragments: Fragment[], separator: string): Fragment {
     }
   }
 
-  return { strings, params };
+  return new Sql(strings, params);
 }
 
-/**
- * Wraps a fragment with a prefix and suffix.
- */
-export function wrap(fragment: Fragment, prefix: string, suffix: string): Fragment {
-  const strings = [...fragment.strings];
-  strings[0] = prefix + strings[0]!;
-  strings[strings.length - 1] += suffix;
-  return { strings, params: [...fragment.params] };
-}
-
-export type ColumnExprFn = (fieldName: string, path?: string[], value?: unknown) => Fragment;
+export type ColumnExprFn = (fieldName: string, path?: string[], value?: unknown) => Sql;
 export type MapValueFn = (val: unknown, field?: Field) => unknown;
 
 export interface BuildOptions {
@@ -146,19 +193,19 @@ export interface BuildOptions {
   mapValue?: MapValueFn;
 }
 
-function whereRecursive<T>(clause: Where<T>, options: BuildOptions): Fragment {
+function whereRecursive<T>(clause: Where<T>, options: BuildOptions): Sql {
   if ("and" in clause) {
-    const parts: Fragment[] = [];
+    const parts: Sql[] = [];
     for (let i = 0; i < clause.and.length; i++) {
-      parts.push(wrap(whereRecursive(clause.and[i]!, options), "(", ")"));
+      parts.push(sql`(${whereRecursive(clause.and[i]!, options)})`);
     }
     return join(parts, " AND ");
   }
 
   if ("or" in clause) {
-    const parts: Fragment[] = [];
+    const parts: Sql[] = [];
     for (let i = 0; i < clause.or.length; i++) {
-      parts.push(wrap(whereRecursive(clause.or[i]!, options), "(", ")"));
+      parts.push(sql`(${whereRecursive(clause.or[i]!, options)})`);
     }
     return join(parts, " OR ");
   }
@@ -170,42 +217,32 @@ function whereRecursive<T>(clause: Where<T>, options: BuildOptions): Fragment {
 
   switch (clause.op) {
     case "eq":
-      if (val === null) return wrap(expr, "", " IS NULL");
-      return join([expr, { strings: [" = ", ""], params: [mapped] }], "");
+      if (val === null) return sql`${expr} IS NULL`;
+      return sql`${expr} = ${mapped}`;
     case "ne":
-      if (val === null) return wrap(expr, "", " IS NOT NULL");
-      return join([expr, { strings: [" != ", ""], params: [mapped] }], "");
+      if (val === null) return sql`${expr} IS NOT NULL`;
+      return sql`${expr} != ${mapped}`;
     case "gt":
-      return join([expr, { strings: [" > ", ""], params: [mapped] }], "");
+      return sql`${expr} > ${mapped}`;
     case "gte":
-      return join([expr, { strings: [" >= ", ""], params: [mapped] }], "");
+      return sql`${expr} >= ${mapped}`;
     case "lt":
-      return join([expr, { strings: [" < ", ""], params: [mapped] }], "");
+      return sql`${expr} < ${mapped}`;
     case "lte":
-      return join([expr, { strings: [" <= ", ""], params: [mapped] }], "");
+      return sql`${expr} <= ${mapped}`;
     case "in": {
       // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val cast to unknown array for in operator
       const vArr = val as unknown[];
-      if (!Array.isArray(vArr) || vArr.length === 0) return { strings: ["1=0"], params: [] };
+      if (!Array.isArray(vArr) || vArr.length === 0) return sql`1=0`;
       const params = options.mapValue ? vArr.map((v) => options.mapValue!(v, field)) : vArr;
-      const inFrag: Fragment = {
-        // eslint-disable-next-line unicorn/no-new-array -- creating array of specific length for placeholders
-        strings: [" IN (", ...new Array<string>(vArr.length - 1).fill(", "), ")"],
-        params,
-      };
-      return join([expr, inFrag], "");
+      return sql`${expr} IN (${paramList(params)})`;
     }
     case "not_in": {
       // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val cast to unknown array for not_in operator
       const vArr = val as unknown[];
-      if (!Array.isArray(vArr) || vArr.length === 0) return { strings: ["1=1"], params: [] };
+      if (!Array.isArray(vArr) || vArr.length === 0) return sql`1=1`;
       const params = options.mapValue ? vArr.map((v) => options.mapValue!(v, field)) : vArr;
-      const inFrag: Fragment = {
-        // eslint-disable-next-line unicorn/no-new-array -- creating array of specific length for placeholders
-        strings: [" NOT IN (", ...new Array<string>(vArr.length - 1).fill(", "), ")"],
-        params,
-      };
-      return join([expr, inFrag], "");
+      return sql`${expr} NOT IN (${paramList(params)})`;
     }
     default:
       throw new Error(`Unsupported operator: ${String((clause as Record<string, unknown>)["op"])}`);
@@ -215,36 +252,33 @@ function whereRecursive<T>(clause: Where<T>, options: BuildOptions): Fragment {
 export function where<T>(
   clause: Where<T> | undefined,
   options: BuildOptions & { cursor?: Cursor<T>; sortBy?: SortBy<T>[] },
-): Fragment {
-  const parts: Fragment[] = [];
+): Sql {
+  const parts: Sql[] = [];
 
   if (clause) {
-    parts.push(wrap(whereRecursive(clause, options), "(", ")"));
+    parts.push(sql`(${whereRecursive(clause, options)})`);
   }
 
   if (options.cursor) {
     const paginationWhere = getPaginationFilter(options.cursor, options.sortBy);
     if (paginationWhere) {
-      parts.push(wrap(whereRecursive(paginationWhere, options), "(", ")"));
+      parts.push(sql`(${whereRecursive(paginationWhere, options)})`);
     }
   }
 
-  return parts.length > 0 ? join(parts, " AND ") : { strings: ["1=1"], params: [] };
+  return parts.length > 0 ? join(parts, " AND ") : sql`1=1`;
 }
 
 /**
  * Prepares a SET clause for UPDATE or UPSERT.
  */
-export function set(data: Record<string, unknown>, quote: (s: string) => string): Fragment {
+export function set(data: Record<string, unknown>, quote: (s: string) => string): Sql {
   const fields = Object.keys(data);
   if (fields.length === 0) throw new Error("set() called with empty data");
-  const parts: Fragment[] = [];
+  const parts: Sql[] = [];
   for (let i = 0; i < fields.length; i++) {
     const f = fields[i]!;
-    parts.push({
-      strings: [`${quote(f)} = `, ""],
-      params: [data[f]],
-    });
+    parts.push(sql`${raw(quote(f))} = ${data[f]}`);
   }
   return join(parts, ", ");
 }
@@ -252,14 +286,14 @@ export function set(data: Record<string, unknown>, quote: (s: string) => string)
 /**
  * Prepares an ORDER BY clause.
  */
-export function sort<T>(sortBy: SortBy<T>[], columnExpr: ColumnExprFn): Fragment {
+export function sort<T>(sortBy: SortBy<T>[], columnExpr: ColumnExprFn): Sql {
   if (sortBy.length === 0) throw new Error("sort() called with empty sortBy");
-  const parts: Fragment[] = [];
+  const parts: Sql[] = [];
   for (let i = 0; i < sortBy.length; i++) {
     const s = sortBy[i]!;
     const expr = columnExpr(s.field as string, s.path);
     const dir = (s.direction ?? "asc").toUpperCase();
-    parts.push(wrap(expr, "", ` ${dir}`));
+    parts.push(sql`${expr} ${raw(dir)}`);
   }
   return join(parts, ", ");
 }
