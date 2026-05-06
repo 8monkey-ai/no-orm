@@ -187,23 +187,20 @@ function createSyncSqliteExecutor(driver: SyncDriver, inTransaction = false): Qu
 
   return {
     all: (query: Sql) => {
-      const { strings, params } = query;
-      const sqlStr = strings.join("?");
+      const sqlStr = query.compile("?");
       // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver result row matches Record shape
-      return Promise.resolve(getPrepared(sqlStr).all(...params) as Record<string, unknown>[]);
+      return Promise.resolve(getPrepared(sqlStr).all(...query.params) as Record<string, unknown>[]);
     },
     get: (query: Sql) => {
-      const { strings, params } = query;
-      const sqlStr = strings.join("?");
+      const sqlStr = query.compile("?");
       return Promise.resolve(
         // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver returns either a row object or undefined
-        getPrepared(sqlStr).get(...params) as Record<string, unknown> | undefined,
+        getPrepared(sqlStr).get(...query.params) as Record<string, unknown> | undefined,
       );
     },
     run: (query: Sql) => {
-      const { strings, params } = query;
-      const sqlStr = strings.join("?");
-      const res = getPrepared(sqlStr).run(...params);
+      const sqlStr = query.compile("?");
+      const res = getPrepared(sqlStr).run(...query.params);
       return Promise.resolve({ changes: res.changes });
     },
     transaction: async (fn) => {
@@ -224,11 +221,11 @@ function createSyncSqliteExecutor(driver: SyncDriver, inTransaction = false): Qu
 function createAsyncSqliteExecutor(driver: SqliteDatabase, inTransaction = false): QueryExecutor {
   return {
     // eslint-disable-next-line typescript-eslint/no-unsafe-return -- async driver returns rows
-    all: (query: Sql) => driver.all(query.strings.join("?"), query.params),
+    all: (query: Sql) => driver.all(query.compile("?"), query.params),
     // eslint-disable-next-line typescript-eslint/no-unsafe-return -- async driver returns row
-    get: (query: Sql) => driver.get(query.strings.join("?"), query.params),
+    get: (query: Sql) => driver.get(query.compile("?"), query.params),
     run: async (query: Sql) => {
-      const res = await driver.run(query.strings.join("?"), query.params);
+      const res = await driver.run(query.compile("?"), query.params);
       return { changes: res.changes ?? 0 };
     },
     transaction: async (fn) => {

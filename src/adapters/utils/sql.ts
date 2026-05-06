@@ -22,6 +22,26 @@ export class Sql {
     strings.raw ??= this.strings;
     return [strings as TemplateStringsArray, ...this.params];
   }
+
+  /**
+   * Compiles the Sql instance into a single string with placeholders.
+   * Useful for drivers that expect a SQL string and a separate array of parameters.
+   */
+  compile(placeholder: string | ((index: number) => string)): string {
+    const paramsLength = this.params.length;
+    if (paramsLength === 0) return this.strings[0]!;
+
+    if (typeof placeholder === "string") {
+      return this.strings.join(placeholder);
+    }
+
+    let result = "";
+    for (let i = 0; i < paramsLength; i++) {
+      result += this.strings[i]! + placeholder(i);
+    }
+    result += this.strings[paramsLength]!;
+    return result;
+  }
 }
 
 /**

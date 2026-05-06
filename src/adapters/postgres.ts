@@ -219,10 +219,7 @@ function createPgExecutor(
 ): QueryExecutor {
   function getPrepared(query: Sql) {
     // pg needs a single string with $1, $2 placeholders
-    const text = query.strings.reduce(
-      (acc, s, i) => acc + s + (i < query.params.length ? "$" + (i + 1) : ""),
-      "",
-    );
+    const text = query.compile((i) => "$" + (i + 1));
     const values = query.params;
 
     const name = `q_${createHash("sha1").update(text).digest("hex").slice(0, 16)}`;
