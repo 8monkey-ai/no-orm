@@ -5,7 +5,7 @@ import {
   assertNoPrimaryKeyUpdates,
   getNestedValue,
   getPaginationFilter,
-  getPrimaryKeyFields,
+  getPrimaryKeyFieldNames,
   getPrimaryKeyValues,
   walkWhere,
 } from "./utils/common";
@@ -69,7 +69,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
   }): Promise<T> {
     const { model, data, select } = args;
     const pkIndex = this.pkIndexes.get(model)!;
-    const pkValue = this.getPrimaryKeyString(model, data);
+    const pkValue = this.getPrimaryKeyHash(model, data);
 
     if (pkIndex.has(pkValue)) {
       throw new Error(`Record with primary key ${pkValue} already exists in ${model}`);
@@ -87,7 +87,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     // Add to global LRU for eviction tracking
     this.globalLRU.set(record, model);
 
-    return Promise.resolve(this.applySelect(record, select));
+    return Promise.resolve(this.mapFromRecord(record, select));
   }
 
   find<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
@@ -98,18 +98,18 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     const { model, where, select } = args;
 
     // Fast path: PK lookup
-    const primaryKeyFields = getPrimaryKeyFields(this.schema[model]!);
+    const primaryKeyFieldNames = getPrimaryKeyFieldNames(this.schema[model]!);
     if (
       "field" in where &&
-      primaryKeyFields.length === 1 &&
-      where.field === primaryKeyFields[0] &&
+      primaryKeyFieldNames.length === 1 &&
+      where.field === primaryKeyFieldNames[0] &&
       where.op === "eq"
     ) {
       const pkValue = String(where.value);
       const row = this.pkIndexes.get(model)!.get(pkValue);
       if (row && this.matchesWhere(where, row)) {
         this.globalLRU.get(row); // Touch for LRU
-        return Promise.resolve(this.applySelect(row, select));
+        return Promise.resolve(this.mapFromRecord(row, select));
       }
     }
 
@@ -118,7 +118,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
       const value = heap[i]!;
       if (this.matchesWhere(where, value)) {
         this.globalLRU.get(value); // Touch for LRU
-        return Promise.resolve(this.applySelect(value, select));
+        return Promise.resolve(this.mapFromRecord(value, select));
       }
     }
     return Promise.resolve(null);
@@ -146,7 +146,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
 
     let out: RowData[] = results;
     if (cursor !== undefined) {
-      out = this.applyCursor(out, cursor, sortBy);
+      out = this.filterByCursor(out, cursor, sortBy);
     }
 
     if (sortBy !== undefined && sortBy.length > 0) {
@@ -159,7 +159,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     for (let i = start; i < end && i < out.length; i++) {
       const r = out[i]!;
       this.globalLRU.get(r); // Touch for LRU
-      final.push(this.applySelect<T>(r, select));
+      final.push(this.mapFromRecord<T>(r, select));
     }
     return Promise.resolve(final);
   }
@@ -181,7 +181,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
       if (this.matchesWhere(where, value)) {
         const updated: RowData = Object.assign(value, data);
         this.globalLRU.set(updated, model); // Update in LRU
-        return Promise.resolve(this.applySelect<T>(updated));
+        return Promise.resolve(this.mapFromRecord<T>(updated));
       }
     }
     return Promise.resolve(null);
@@ -225,17 +225,17 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     select?: Select<T>;
   }): Promise<T> {
     const { model, create, update, where, select } = args;
-    const pkValue = this.getPrimaryKeyString(model, create);
+    const pkValue = this.getPrimaryKeyHash(model, create);
     const existing = this.pkIndexes.get(model)!.get(pkValue);
 
     if (existing !== undefined) {
       if (this.matchesWhere(where, existing)) {
         const updated: RowData = Object.assign(existing, update);
         this.globalLRU.set(updated, model);
-        return Promise.resolve(this.applySelect(updated, select));
+        return Promise.resolve(this.mapFromRecord(updated, select));
       }
       this.globalLRU.get(existing);
-      return Promise.resolve(this.applySelect(existing, select));
+      return Promise.resolve(this.mapFromRecord(existing, select));
     }
 
     return this.create({ model, data: create, select });
@@ -317,18 +317,18 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
 
     // Cleanup indexes
     this.indexMap.delete(row);
-    const pkValue = this.getPrimaryKeyString(model, row);
+    const pkValue = this.getPrimaryKeyHash(model, row);
     pkIndex.delete(pkValue);
   }
 
-  private getPrimaryKeyString(modelName: string, data: Record<string, unknown>): string {
+  private getPrimaryKeyHash(modelName: string, data: Record<string, unknown>): string {
     const modelSpec = this.schema[modelName as keyof S & string]!;
     const primaryKeyValues = getPrimaryKeyValues(modelSpec, data);
-    const primaryKeyFields = getPrimaryKeyFields(modelSpec);
+    const primaryKeyFieldNames = getPrimaryKeyFieldNames(modelSpec);
     let res = "";
-    for (let i = 0; i < primaryKeyFields.length; i++) {
+    for (let i = 0; i < primaryKeyFieldNames.length; i++) {
       if (i > 0) res += "|";
-      const val = primaryKeyValues[primaryKeyFields[i]!];
+      const val = primaryKeyValues[primaryKeyFieldNames[i]!];
       if (val !== null && val !== undefined) {
         if (typeof val === "object") {
           res += JSON.stringify(val);
@@ -375,7 +375,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     });
   }
 
-  private applySelect<T extends Record<string, unknown>>(record: RowData, select?: Select<T>): T {
+  private mapFromRecord<T extends Record<string, unknown>>(record: RowData, select?: Select<T>): T {
     // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- record matches shape of T
     if (select === undefined) return Object.assign({}, record) as T;
     const res: RowData = {};
@@ -387,7 +387,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     return res as T;
   }
 
-  private applyCursor<T extends Record<string, unknown>>(
+  private filterByCursor<T extends Record<string, unknown>>(
     results: RowData[],
     cursor: Cursor<T>,
     sortBy?: SortBy<T>[],

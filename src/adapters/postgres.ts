@@ -18,7 +18,7 @@ import type {
 import {
   assertNoPrimaryKeyUpdates,
   buildPrimaryKeyFilter,
-  getPrimaryKeyFields,
+  getPrimaryKeyFieldNames,
   getPrimaryKeyValues,
   mapNumeric,
 } from "./utils/common";
@@ -28,8 +28,8 @@ import {
   Sql,
   sql,
   raw,
-  idList,
-  paramList,
+  columnList,
+  placeholders,
   where,
   set,
   sort,
@@ -49,7 +49,7 @@ export type PostgresDriver =
 // --- Internal PG Syntax Helpers ---
 
 const ident = (s: string) => raw(`"${s}"`);
-const selectCols = (select?: readonly string[]) => (select ? idList(select) : raw("*"));
+const selectCols = (select?: readonly string[]) => (select ? columnList(select) : raw("*"));
 
 function mapFromRecord<T extends Record<string, unknown>>(
   model: Model,
@@ -115,7 +115,7 @@ function toColumnExpr(model: Model, fieldName: string, path?: string[], value?: 
   const isNumeric = typeof value === "number";
   const isBoolean = typeof value === "boolean";
 
-  let res = sql`jsonb_extract_path_text(${ident(fieldName)}, ${paramList(path)})`;
+  let res = sql`jsonb_extract_path_text(${ident(fieldName)}, ${placeholders(path)})`;
   if (isNumeric) {
     res = sql`(${res})::double precision`;
   } else if (isBoolean) {
@@ -308,8 +308,8 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
         const nullable = field.nullable === true ? "" : " NOT NULL";
         columnParts.push(`"${fieldName}" ${type}${nullable}`);
       }
-      const primaryKeyFields = getPrimaryKeyFields(model);
-      const pk = `PRIMARY KEY (${primaryKeyFields.map((f) => `"${f}"`).join(", ")})`;
+      const primaryKeyFieldNames = getPrimaryKeyFieldNames(model);
+      const pk = `PRIMARY KEY (${primaryKeyFieldNames.map((f) => `"${f}"`).join(", ")})`;
       // eslint-disable-next-line no-await-in-loop -- DDL is intentionally sequential
       await this.executor.run(sql`
         CREATE TABLE IF NOT EXISTS ${ident(name)} (
@@ -352,8 +352,8 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const input = mapToRecord(model, data);
     const fields = Object.keys(input);
     const query = sql`
-      INSERT INTO ${ident(modelName)} (${idList(fields)})
-      VALUES (${paramList(fields.map((f) => input[f]))})
+      INSERT INTO ${ident(modelName)} (${columnList(fields)})
+      VALUES (${placeholders(fields.map((f) => input[f]))})
       RETURNING ${selectCols(select)}
     `;
 
@@ -496,7 +496,7 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const createFields = Object.keys(insertRow);
     const updateRow = mapToRecord(model, updateData);
     const updateFields = Object.keys(updateRow);
-    const primaryKeyFields = getPrimaryKeyFields(model);
+    const primaryKeyFieldNames = getPrimaryKeyFieldNames(model);
 
     const action =
       updateFields.length === 0
@@ -509,9 +509,9 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
           : sql`DO UPDATE SET ${set(updateRow)}`;
 
     const query = sql`
-      INSERT INTO ${ident(modelName)} (${idList(createFields)})
-      VALUES (${paramList(createFields.map((f) => insertRow[f]))})
-      ON CONFLICT (${idList(primaryKeyFields)}) ${action}
+      INSERT INTO ${ident(modelName)} (${columnList(createFields)})
+      VALUES (${placeholders(createFields.map((f) => insertRow[f]))})
+      ON CONFLICT (${columnList(primaryKeyFieldNames)}) ${action}
       RETURNING ${selectCols(select)}
     `;
 

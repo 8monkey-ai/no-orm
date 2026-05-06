@@ -62,14 +62,14 @@ export function sql(strings: TemplateStringsArray, ...values: unknown[]): Sql {
 /**
  * Joins multiple identifiers with a separator.
  */
-export function idList(names: readonly string[], quoteChar: string = '"'): Sql {
+export function columnList(names: readonly string[], quoteChar: string = '"'): Sql {
   return new Sql([names.map((n) => `${quoteChar}${n}${quoteChar}`).join(", ")], []);
 }
 
 /**
  * Generates a comma-separated list of placeholders for values.
  */
-export function paramList(values: unknown[]): Sql {
+export function placeholders(values: unknown[]): Sql {
   if (values.length === 0) return new Sql([""], []);
   const strings: string[] = [""];
   for (let i = 1; i < values.length; i++) {
@@ -160,12 +160,12 @@ function buildWhere<T>(clause: Where<T>, options: WhereOptions): Sql {
         case "in": {
           if (c.value.length === 0) return sql`1=0`;
           const params = options.mapValue ? c.value.map((v) => options.mapValue!(v, field)) : c.value;
-          return sql`${expr} IN (${paramList(params)})`;
+          return sql`${expr} IN (${placeholders(params)})`;
         }
         case "not_in": {
           if (c.value.length === 0) return sql`1=1`;
           const params = options.mapValue ? c.value.map((v) => options.mapValue!(v, field)) : c.value;
-          return sql`${expr} NOT IN (${paramList(params)})`;
+          return sql`${expr} NOT IN (${placeholders(params)})`;
         }
         default:
           // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- accessing op for error message

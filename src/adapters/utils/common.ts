@@ -49,7 +49,7 @@ export function walkWhere<R, T = Record<string, unknown>>(
 
 // --- Schema & Logic Helpers ---
 
-export function getPrimaryKeyFields(model: Model): string[] {
+export function getPrimaryKeyFieldNames(model: Model): string[] {
   return Array.isArray(model.primaryKey) ? model.primaryKey : [model.primaryKey];
 }
 
@@ -60,10 +60,10 @@ export function getPrimaryKeyValues(
   model: Model,
   data: Record<string, unknown>,
 ): Record<string, unknown> {
-  const primaryKeyFields = getPrimaryKeyFields(model);
+  const primaryKeyFieldNames = getPrimaryKeyFieldNames(model);
   const values: Record<string, unknown> = {};
-  for (let i = 0; i < primaryKeyFields.length; i++) {
-    const field = primaryKeyFields[i]!;
+  for (let i = 0; i < primaryKeyFieldNames.length; i++) {
+    const field = primaryKeyFieldNames[i]!;
     if (!(field in data)) {
       throw new Error(`Missing primary key field: ${field}`);
     }
@@ -79,16 +79,16 @@ export function buildPrimaryKeyFilter<T = Record<string, unknown>>(
   model: Model,
   source: Record<string, unknown>,
 ): Where<T> {
-  const primaryKeyFields = getPrimaryKeyFields(model);
-  if (primaryKeyFields.length === 1) {
-    const field = primaryKeyFields[0]!;
+  const primaryKeyFieldNames = getPrimaryKeyFieldNames(model);
+  if (primaryKeyFieldNames.length === 1) {
+    const field = primaryKeyFieldNames[0]!;
     // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- field name from schema is guaranteed to be in T
     return { field: field as FieldName<T>, op: "eq" as const, value: source[field] };
   }
 
   const clauses: Where<T>[] = [];
-  for (let i = 0; i < primaryKeyFields.length; i++) {
-    const field = primaryKeyFields[i]!;
+  for (let i = 0; i < primaryKeyFieldNames.length; i++) {
+    const field = primaryKeyFieldNames[i]!;
     // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- field name from schema is guaranteed to be in T
     clauses.push({ field: field as FieldName<T>, op: "eq" as const, value: source[field] });
   }
@@ -96,9 +96,9 @@ export function buildPrimaryKeyFilter<T = Record<string, unknown>>(
 }
 
 export function assertNoPrimaryKeyUpdates(model: Model, data: Record<string, unknown>): void {
-  const primaryKeyFields = getPrimaryKeyFields(model);
-  for (let i = 0; i < primaryKeyFields.length; i++) {
-    const field = primaryKeyFields[i]!;
+  const primaryKeyFieldNames = getPrimaryKeyFieldNames(model);
+  for (let i = 0; i < primaryKeyFieldNames.length; i++) {
+    const field = primaryKeyFieldNames[i]!;
     if (data[field] !== undefined) {
       throw new Error("Primary key updates are not supported.");
     }
