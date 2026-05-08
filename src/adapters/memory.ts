@@ -369,7 +369,9 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
             return !c.value.includes(recordVal);
           default:
             // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- accessing op for error message
-            throw new Error(`Unsupported operator: ${String((c as Record<string, unknown>)["op"])}`);
+            throw new Error(
+              `Unsupported operator: ${String((c as Record<string, unknown>)["op"])}`,
+            );
         }
       },
     });

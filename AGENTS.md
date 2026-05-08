@@ -21,12 +21,15 @@ This file defines the architectural principles and implementation standards for 
 ## Implementation Standards
 
 ### TypeScript & Type Safety
+
 - **Use `unknown` over `any`**: All internal signatures must use `unknown` or concrete types. Use narrowing (guards/typeof) before access.
 - **Justified Assertions**: Use `eslint-disable-next-line` with a short, specific reason for unavoidable type assertions (e.g., at adapter boundaries where `RowData -> T`).
 - **Strict Linting**: Do not modify `.oxlintrc.json`. Fix the code to satisfy the rules.
 
 ### High-Performance Internals
+
 These rules apply to all internal adapter methods and shared utility loops:
+
 - **No Object Spreads**: Use `Object.assign({}, ...)` instead of `{ ... }` to ensure hidden class stability and reduce transpilation overhead in hot paths.
 - **Avoid `delete`**: Do not delete properties from objects (deoptimizes V8/JSC). Set to `undefined` or construct a new object.
 - **Indexed Loops**: Prefer `for (let i = 0; i < arr.length; i++)` over `for...of` or `.forEach` to avoid iterator protocol overhead.
@@ -43,7 +46,7 @@ These rules apply to all internal adapter methods and shared utility loops:
 1.  **Minimal Edits**: Keep changes localized. Avoid broad refactors unless explicitly requested.
 2.  **Order Preservation**: Do not rearrange existing classes or methods. Maintaining original order ensures clean git diffs and efficient review.
 3.  **Explain the "Why"**: Retain or add comments explaining architectural choices (e.g., sequential DDL, driver detection order).
-4.  **Verification**: 
+4.  **Verification**:
     - Check `package.json` for current scripts.
     - Run linting, type-checking, and tests (`bun test`) before finishing.
     - Do not run `bun run clean` unless explicitly requested (`git clean -fdx`).

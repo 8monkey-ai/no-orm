@@ -28,11 +28,12 @@ import {
   Sql,
   sql,
   raw,
-  columnList,
+  id,
   placeholders,
   where,
   set,
   sort,
+  join,
 } from "./utils/sql";
 
 type PostgresJsSql = postgres.Sql;
@@ -47,9 +48,6 @@ export type PostgresDriver =
   | BunSQL;
 
 // --- Internal PG Syntax Helpers ---
-
-const ident = (s: string) => raw(`"${s}"`);
-const selectCols = (select?: readonly string[]) => (select ? columnList(select) : raw("*"));
 
 function mapFromRecord<T extends Record<string, unknown>>(
   model: Model,
@@ -106,7 +104,7 @@ function sqlType(field: Field): string {
 }
 
 function toColumnExpr(model: Model, fieldName: string, path?: string[], value?: unknown): Sql {
-  if (!path || path.length === 0) return ident(fieldName);
+  if (!path || path.length === 0) return id(fieldName);
   const field = model.fields[fieldName];
   if (field?.type !== "json" && field?.type !== "json[]") {
     throw new Error(`Cannot use JSON path on non-JSON field: ${fieldName}`);
@@ -115,7 +113,7 @@ function toColumnExpr(model: Model, fieldName: string, path?: string[], value?: 
   const isNumeric = typeof value === "number";
   const isBoolean = typeof value === "boolean";
 
-  let res = sql`jsonb_extract_path_text(${ident(fieldName)}, ${placeholders(path)})`;
+  let res = sql`jsonb_extract_path_text(${id(fieldName)}, ${placeholders(path)})`;
   if (isNumeric) {
     res = sql`(${res})::double precision`;
   } else if (isBoolean) {
@@ -298,20 +296,20 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     for (let i = 0; i < models.length; i++) {
       const [name, model] = models[i]!;
       const fields = Object.entries(model.fields);
-      const columnParts: string[] = [];
+      const columnParts: Sql[] = [];
       for (let j = 0; j < fields.length; j++) {
         const [fieldName, field] = fields[j]!;
         const type = sqlType(field);
         const nullable = field.nullable === true ? "" : " NOT NULL";
-        columnParts.push(`"${fieldName}" ${type}${nullable}`);
+        columnParts.push(sql`${id(fieldName)} ${raw(type)}${raw(nullable)}`);
       }
       const primaryKeyFieldNames = getPrimaryKeyFieldNames(model);
-      const pk = `PRIMARY KEY (${primaryKeyFieldNames.map((f) => `"${f}"`).join(", ")})`;
+      const pk = sql`PRIMARY KEY (${id(primaryKeyFieldNames)})`;
       // eslint-disable-next-line no-await-in-loop -- DDL is intentionally sequential
       await this.executor.run(sql`
-        CREATE TABLE IF NOT EXISTS ${ident(name)} (
-          ${raw(columnParts.join(", "))},
-          ${raw(pk)}
+        CREATE TABLE IF NOT EXISTS ${id(name)} (
+          ${join(columnParts, ", ")},
+          ${pk}
         )
       `);
     }
@@ -323,13 +321,15 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
       for (let j = 0; j < model.indexes.length; j++) {
         const idx = model.indexes[j]!;
         const fields = Array.isArray(idx.field) ? idx.field : [idx.field];
-        const formatted = fields.map(
-          (f) => `"${f}"${idx.order ? ` ${idx.order.toUpperCase()}` : ""}`,
-        );
+        const formatted: Sql[] = [];
+        for (let k = 0; k < fields.length; k++) {
+          const f = fields[k]!;
+          formatted.push(sql`${id(f)}${raw(idx.order ? ` ${idx.order.toUpperCase()}` : "")}`);
+        }
         // eslint-disable-next-line no-await-in-loop -- DDL is intentionally sequential
         await this.executor.run(sql`
-          CREATE INDEX IF NOT EXISTS ${ident(`idx_${name}_${j}`)}
-          ON ${ident(name)} (${raw(formatted.join(", "))})
+          CREATE INDEX IF NOT EXISTS ${id(`idx_${name}_${j}`)}
+          ON ${id(name)} (${join(formatted, ", ")})
         `);
       }
     }
@@ -348,10 +348,14 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const model = this.schema[modelName]!;
     const input = mapToRecord(model, data);
     const fields = Object.keys(input);
+    const values: unknown[] = [];
+    for (let i = 0; i < fields.length; i++) {
+      values.push(input[fields[i]!]);
+    }
     const query = sql`
-      INSERT INTO ${ident(modelName)} (${columnList(fields)})
-      VALUES (${placeholders(fields.map((f) => input[f]))})
-      RETURNING ${selectCols(select)}
+      INSERT INTO ${id(modelName)} (${id(fields)})
+      VALUES (${placeholders(values)})
+      RETURNING ${select && select.length > 0 ? id(select) : raw("*")}
     `;
 
     const row = await this.executor.get(query);
@@ -366,8 +370,8 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const { model: modelName, select } = args;
     const model = this.schema[modelName]!;
     const query = sql`
-      SELECT ${selectCols(select)}
-      FROM ${ident(modelName)}
+      SELECT ${select && select.length > 0 ? id(select) : raw("*")}
+      FROM ${id(modelName)}
       WHERE ${where(args.where, { model, columnExpr: toColumnExpr })}
       LIMIT 1
     `;
@@ -392,8 +396,8 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const { model: modelName, select, sortBy, limit, offset, cursor } = args;
     const model = this.schema[modelName]!;
     let query = sql`
-      SELECT ${selectCols(select)}
-      FROM ${ident(modelName)}
+      SELECT ${select && select.length > 0 ? id(select) : raw("*")}
+      FROM ${id(modelName)}
       WHERE ${where(args.where, { model, columnExpr: toColumnExpr, cursor, sortBy })}
     `;
 
@@ -432,7 +436,7 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
       return this.find({ model: modelName, where: args.where, select: undefined });
 
     const query = sql`
-      UPDATE ${ident(modelName)}
+      UPDATE ${id(modelName)}
       SET ${set(input)}
       WHERE ${where(args.where, { model, columnExpr: toColumnExpr })}
       RETURNING *
@@ -459,7 +463,7 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     if (fields.length === 0) return 0;
 
     const query = sql`
-      UPDATE ${ident(modelName)}
+      UPDATE ${id(modelName)}
       SET ${set(input)}
       WHERE ${where(args.where, { model, columnExpr: toColumnExpr })}
     `;
@@ -505,11 +509,16 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
             })}`
           : sql`DO UPDATE SET ${set(updateRow)}`;
 
+    const values: unknown[] = [];
+    for (let i = 0; i < createFields.length; i++) {
+      values.push(insertRow[createFields[i]!]);
+    }
+
     const query = sql`
-      INSERT INTO ${ident(modelName)} (${columnList(createFields)})
-      VALUES (${placeholders(createFields.map((f) => insertRow[f]))})
-      ON CONFLICT (${columnList(primaryKeyFieldNames)}) ${action}
-      RETURNING ${selectCols(select)}
+      INSERT INTO ${id(modelName)} (${id(createFields)})
+      VALUES (${placeholders(values)})
+      ON CONFLICT (${id(primaryKeyFieldNames)}) ${action}
+      RETURNING ${select && select.length > 0 ? id(select) : raw("*")}
     `;
 
     const row = await this.executor.get(query);
@@ -533,7 +542,7 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const { model: modelName } = args;
     const model = this.schema[modelName]!;
     const query = sql`
-      DELETE FROM ${ident(modelName)}
+      DELETE FROM ${id(modelName)}
       WHERE ${where(args.where, { model, columnExpr: toColumnExpr })}
     `;
     await this.executor.run(query);
@@ -546,7 +555,7 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const { model: modelName } = args;
     const model = this.schema[modelName]!;
     const query = sql`
-      DELETE FROM ${ident(modelName)}
+      DELETE FROM ${id(modelName)}
       WHERE ${where(args.where, { model, columnExpr: toColumnExpr })}
     `;
     const res = await this.executor.run(query);
@@ -561,7 +570,7 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const model = this.schema[modelName]!;
     const query = sql`
       SELECT COUNT(*) as count
-      FROM ${ident(modelName)}
+      FROM ${id(modelName)}
       WHERE ${where(args.where, { model, columnExpr: toColumnExpr })}
     `;
     const row = await this.executor.get(query);

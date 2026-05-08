@@ -80,10 +80,30 @@ export function sql(strings: TemplateStringsArray, ...values: unknown[]): Sql {
 }
 
 /**
- * Joins multiple identifiers with a separator.
+ * Safely quotes a SQL identifier or list of identifiers.
+ * - id("users") -> "users"
+ * - id(["id", "name"]) -> "id", "name"
  */
-export function columnList(names: readonly string[], quoteChar: string = '"'): Sql {
-  return new Sql([names.map((n) => `${quoteChar}${n}${quoteChar}`).join(", ")], []);
+export function id(val: string | readonly string[], quoteChar = '"'): Sql {
+  if (val === "" || (Array.isArray(val) && val.length === 0)) return raw("");
+
+  const regex = new RegExp(quoteChar, "g");
+  const escape = quoteChar + quoteChar;
+
+  if (Array.isArray(val)) {
+    let res = "";
+    for (let i = 0; i < val.length; i++) {
+      if (i > 0) res += ", ";
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val[i] is a string from readonly string[]
+      const s = val[i] as string;
+      res += quoteChar + s.replace(regex, escape) + quoteChar;
+    }
+    return raw(res);
+  }
+
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val is a string here
+  const s = val as string;
+  return raw(quoteChar + s.replace(regex, escape) + quoteChar);
 }
 
 /**
@@ -157,8 +177,20 @@ export interface WhereOptions {
 
 function buildWhere<T>(clause: Where<T>, options: WhereOptions): Sql {
   return walkWhere<Sql, T>(clause, {
-    and: (children) => join(children.map((c) => sql`(${c})`), " AND "),
-    or: (children) => join(children.map((c) => sql`(${c})`), " OR "),
+    and: (children) => {
+      const parts: Sql[] = [];
+      for (let i = 0; i < children.length; i++) {
+        parts.push(sql`(${children[i]!})`);
+      }
+      return join(parts, " AND ");
+    },
+    or: (children) => {
+      const parts: Sql[] = [];
+      for (let i = 0; i < children.length; i++) {
+        parts.push(sql`(${children[i]!})`);
+      }
+      return join(parts, " OR ");
+    },
     leaf: (c) => {
       const expr = options.columnExpr(options.model, c.field as string, c.path, c.value);
       const field = options.model.fields[c.field as string];
@@ -179,12 +211,24 @@ function buildWhere<T>(clause: Where<T>, options: WhereOptions): Sql {
           return sql`${expr} <= ${mapped}`;
         case "in": {
           if (c.value.length === 0) return sql`1=0`;
-          const params = options.mapValue ? c.value.map((v) => options.mapValue!(v, field)) : c.value;
+          let params: unknown[] = c.value;
+          if (options.mapValue) {
+            params = [];
+            for (let i = 0; i < c.value.length; i++) {
+              params.push(options.mapValue(c.value[i], field));
+            }
+          }
           return sql`${expr} IN (${placeholders(params)})`;
         }
         case "not_in": {
           if (c.value.length === 0) return sql`1=1`;
-          const params = options.mapValue ? c.value.map((v) => options.mapValue!(v, field)) : c.value;
+          let params: unknown[] = c.value;
+          if (options.mapValue) {
+            params = [];
+            for (let i = 0; i < c.value.length; i++) {
+              params.push(options.mapValue(c.value[i], field));
+            }
+          }
           return sql`${expr} NOT IN (${placeholders(params)})`;
         }
         default:
@@ -218,13 +262,13 @@ export function where<T>(
 /**
  * Prepares a SET clause for UPDATE or UPSERT.
  */
-export function set(data: Record<string, unknown>, quoteChar: string = '"'): Sql {
+export function set(data: Record<string, unknown>, quoteChar = '"'): Sql {
   const fields = Object.keys(data);
   if (fields.length === 0) throw new Error("set() called with empty data");
   const parts: Sql[] = [];
   for (let i = 0; i < fields.length; i++) {
     const f = fields[i]!;
-    parts.push(sql`${raw(`${quoteChar}${f}${quoteChar}`)} = ${data[f]}`);
+    parts.push(sql`${id(f, quoteChar)} = ${data[f]}`);
   }
   return join(parts, ", ");
 }

@@ -27,11 +27,12 @@ import {
   Sql,
   sql,
   raw,
-  columnList,
+  id,
   placeholders,
   where,
   set,
   sort,
+  join,
 } from "./utils/sql";
 
 export type SqliteDriver = SqliteDatabase | BunDatabase | BetterSqlite3Database;
@@ -43,9 +44,6 @@ export type SqliteDriver = SqliteDatabase | BunDatabase | BetterSqlite3Database;
 const MAX_CACHED_STATEMENTS = 100;
 
 // --- Internal SQLite Syntax Helpers ---
-
-const ident = (s: string) => raw(`"${s}"`);
-const selectCols = (select?: readonly string[]) => (select ? columnList(select) : raw("*"));
 
 const mapSqliteValue = (val: unknown, field?: Field) => {
   if (field?.type === "boolean" || (field === undefined && typeof val === "boolean")) {
@@ -145,12 +143,12 @@ function toJsonPath(path: string[]): string {
 }
 
 function toColumnExpr(model: Model, fieldName: string, path?: string[]): Sql {
-  if (!path || path.length === 0) return ident(fieldName);
+  if (!path || path.length === 0) return id(fieldName);
   const field = model.fields[fieldName];
   if (field?.type !== "json" && field?.type !== "json[]") {
     throw new Error(`Cannot use JSON path on non-JSON field: ${fieldName}`);
   }
-  return sql`json_extract(${ident(fieldName)}, ${toJsonPath(path)})`;
+  return sql`json_extract(${id(fieldName)}, ${toJsonPath(path)})`;
 }
 
 // --- Driver detection and executors ---
@@ -272,16 +270,20 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     for (let i = 0; i < models.length; i++) {
       const [name, model] = models[i]!;
       const fields = Object.entries(model.fields);
-      const columns = fields.map(
-        ([fname, f]) => `"${fname}" ${sqlType(f)}${f.nullable === true ? "" : " NOT NULL"}`,
-      );
+      const columnsList: Sql[] = [];
+      for (let j = 0; j < fields.length; j++) {
+        const [fname, f] = fields[j]!;
+        columnsList.push(
+          sql`${id(fname)} ${raw(sqlType(f))}${raw(f.nullable === true ? "" : " NOT NULL")}`,
+        );
+      }
       const primaryKeyFieldNames = getPrimaryKeyFieldNames(model);
-      const pk = `PRIMARY KEY (${primaryKeyFieldNames.map((f) => `"${f}"`).join(", ")})`;
+      const pk = sql`PRIMARY KEY (${id(primaryKeyFieldNames)})`;
       // eslint-disable-next-line no-await-in-loop -- DDL is intentionally sequential
       await this.executor.run(sql`
-        CREATE TABLE IF NOT EXISTS ${ident(name)} (
-          ${raw(columns.join(", "))},
-          ${raw(pk)}
+        CREATE TABLE IF NOT EXISTS ${id(name)} (
+          ${join(columnsList, ", ")},
+          ${pk}
         )
       `);
     }
@@ -293,13 +295,15 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
       for (let j = 0; j < model.indexes.length; j++) {
         const idx = model.indexes[j]!;
         const fields = Array.isArray(idx.field) ? idx.field : [idx.field];
-        const formatted = fields.map(
-          (f) => `"${f}"${idx.order ? ` ${idx.order.toUpperCase()}` : ""}`,
-        );
+        const formatted: Sql[] = [];
+        for (let k = 0; k < fields.length; k++) {
+          const f = fields[k]!;
+          formatted.push(sql`${id(f)}${raw(idx.order ? ` ${idx.order.toUpperCase()}` : "")}`);
+        }
         // eslint-disable-next-line no-await-in-loop -- DDL is intentionally sequential
         await this.executor.run(sql`
-          CREATE INDEX IF NOT EXISTS ${ident(`idx_${name}_${j}`)}
-          ON ${ident(name)} (${raw(formatted.join(", "))})
+          CREATE INDEX IF NOT EXISTS ${id(`idx_${name}_${j}`)}
+          ON ${id(name)} (${join(formatted, ", ")})
         `);
       }
     }
@@ -318,10 +322,14 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     const model = this.schema[modelName]!;
     const input = mapToRecord(model, data);
     const fields = Object.keys(input);
+    const values: unknown[] = [];
+    for (let i = 0; i < fields.length; i++) {
+      values.push(input[fields[i]!]);
+    }
     const query = sql`
-      INSERT INTO ${ident(modelName)} (${columnList(fields)})
-      VALUES (${placeholders(fields.map((f) => input[f]))})
-      RETURNING ${selectCols(select)}
+      INSERT INTO ${id(modelName)} (${id(fields)})
+      VALUES (${placeholders(values)})
+      RETURNING ${select && select.length > 0 ? id(select) : raw("*")}
     `;
 
     const row = await this.executor.get(query);
@@ -344,8 +352,8 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     const { model: modelName, select } = args;
     const model = this.schema[modelName]!;
     const query = sql`
-      SELECT ${selectCols(select)}
-      FROM ${ident(modelName)}
+      SELECT ${select && select.length > 0 ? id(select) : raw("*")}
+      FROM ${id(modelName)}
       WHERE ${where(args.where, { model, columnExpr: toColumnExpr, mapValue: mapSqliteValue })}
       LIMIT 1
     `;
@@ -370,8 +378,8 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     const { model: modelName, select, sortBy, limit, offset, cursor } = args;
     const model = this.schema[modelName]!;
     let query = sql`
-      SELECT ${selectCols(select)}
-      FROM ${ident(modelName)}
+      SELECT ${select && select.length > 0 ? id(select) : raw("*")}
+      FROM ${id(modelName)}
       WHERE ${where(args.where, {
         model,
         columnExpr: toColumnExpr,
@@ -416,7 +424,7 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
       return this.find({ model: modelName, where: args.where, select: undefined });
 
     const query = sql`
-      UPDATE ${ident(modelName)}
+      UPDATE ${id(modelName)}
       SET ${set(input)}
       WHERE ${where(args.where, { model, columnExpr: toColumnExpr, mapValue: mapSqliteValue })}
       RETURNING *
@@ -443,7 +451,7 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     if (fields.length === 0) return 0;
 
     const query = sql`
-      UPDATE ${ident(modelName)}
+      UPDATE ${id(modelName)}
       SET ${set(input)}
       WHERE ${where(args.where, { model, columnExpr: toColumnExpr, mapValue: mapSqliteValue })}
     `;
@@ -490,11 +498,16 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
             })}`
           : sql`DO UPDATE SET ${set(updateRow)}`;
 
+    const values: unknown[] = [];
+    for (let i = 0; i < createFields.length; i++) {
+      values.push(insertRow[createFields[i]!]);
+    }
+
     const query = sql`
-      INSERT INTO ${ident(modelName)} (${columnList(createFields)})
-      VALUES (${placeholders(createFields.map((f) => insertRow[f]))})
-      ON CONFLICT (${columnList(primaryKeyFieldNames)}) ${action}
-      RETURNING ${selectCols(select)}
+      INSERT INTO ${id(modelName)} (${id(createFields)})
+      VALUES (${placeholders(values)})
+      ON CONFLICT (${id(primaryKeyFieldNames)}) ${action}
+      RETURNING ${select && select.length > 0 ? id(select) : raw("*")}
     `;
 
     const row = await this.executor.get(query);
@@ -518,7 +531,7 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     const { model: modelName } = args;
     const model = this.schema[modelName]!;
     const query = sql`
-      DELETE FROM ${ident(modelName)}
+      DELETE FROM ${id(modelName)}
       WHERE ${where(args.where, { model, columnExpr: toColumnExpr, mapValue: mapSqliteValue })}
     `;
     await this.executor.run(query);
@@ -531,7 +544,7 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     const { model: modelName } = args;
     const model = this.schema[modelName]!;
     const query = sql`
-      DELETE FROM ${ident(modelName)}
+      DELETE FROM ${id(modelName)}
       WHERE ${where(args.where, { model, columnExpr: toColumnExpr, mapValue: mapSqliteValue })}
     `;
     const res = await this.executor.run(query);
@@ -546,7 +559,7 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     const model = this.schema[modelName]!;
     const query = sql`
       SELECT COUNT(*) as count
-      FROM ${ident(modelName)}
+      FROM ${id(modelName)}
       WHERE ${where(args.where, { model, columnExpr: toColumnExpr, mapValue: mapSqliteValue })}
     `;
     const row = await this.executor.get(query);
