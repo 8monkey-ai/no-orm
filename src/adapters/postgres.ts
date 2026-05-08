@@ -35,6 +35,14 @@ import {
   sort,
   join,
 } from "./utils/sql";
+import {
+  buildSelectSql,
+  buildInsertSql,
+  buildUpdateSql,
+  buildDeleteSql,
+  buildUpsertSql,
+  buildCountSql,
+} from "./utils/statements";
 
 type PostgresJsSql = postgres.Sql;
 type TransactionSql = postgres.TransactionSql;
@@ -352,11 +360,7 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     for (let i = 0; i < fields.length; i++) {
       values.push(input[fields[i]!]);
     }
-    const query = sql`
-      INSERT INTO ${id(modelName)} (${id(fields)})
-      VALUES (${placeholders(values)})
-      RETURNING ${select && select.length > 0 ? id(select) : raw("*")}
-    `;
+    const query = buildInsertSql({ table: modelName, fields, values, returning: select });
 
     const row = await this.executor.get(query);
     if (row === undefined || row === null) throw new Error("Failed to insert record");
@@ -369,12 +373,12 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
   >(args: { model: K; where: Where<T>; select?: Select<T> }): Promise<T | null> {
     const { model: modelName, select } = args;
     const model = this.schema[modelName]!;
-    const query = sql`
-      SELECT ${select && select.length > 0 ? id(select) : raw("*")}
-      FROM ${id(modelName)}
-      WHERE ${where(args.where, { model, columnExpr: toColumnExpr })}
-      LIMIT 1
-    `;
+    const query = buildSelectSql({
+      table: modelName,
+      select,
+      whereClause: where(args.where, { model, columnExpr: toColumnExpr }),
+      limit: 1,
+    });
 
     const row = await this.executor.get(query);
     if (row === undefined || row === null) return null;
@@ -395,21 +399,14 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
   }): Promise<T[]> {
     const { model: modelName, select, sortBy, limit, offset, cursor } = args;
     const model = this.schema[modelName]!;
-    let query = sql`
-      SELECT ${select && select.length > 0 ? id(select) : raw("*")}
-      FROM ${id(modelName)}
-      WHERE ${where(args.where, { model, columnExpr: toColumnExpr, cursor, sortBy })}
-    `;
-
-    if (sortBy && sortBy.length > 0) {
-      query = sql`${query} ORDER BY ${sort(model, sortBy, toColumnExpr)}`;
-    }
-    if (limit !== undefined) {
-      query = sql`${query} LIMIT ${limit}`;
-    }
-    if (offset !== undefined) {
-      query = sql`${query} OFFSET ${offset}`;
-    }
+    const query = buildSelectSql({
+      table: modelName,
+      select,
+      whereClause: where(args.where, { model, columnExpr: toColumnExpr, cursor, sortBy }),
+      orderByClause: sortBy && sortBy.length > 0 ? sort(model, sortBy, toColumnExpr) : undefined,
+      limit,
+      offset,
+    });
     const rows = await this.executor.all(query);
 
     const result: T[] = [];
@@ -435,12 +432,12 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     if (fields.length === 0)
       return this.find({ model: modelName, where: args.where, select: undefined });
 
-    const query = sql`
-      UPDATE ${id(modelName)}
-      SET ${set(input)}
-      WHERE ${where(args.where, { model, columnExpr: toColumnExpr })}
-      RETURNING *
-    `;
+    const query = buildUpdateSql({
+      table: modelName,
+      setClause: set(input),
+      whereClause: where(args.where, { model, columnExpr: toColumnExpr }),
+      returning: true,
+    });
 
     const row = await this.executor.get(query);
     if (row === undefined || row === null)
@@ -462,11 +459,11 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const fields = Object.keys(input);
     if (fields.length === 0) return 0;
 
-    const query = sql`
-      UPDATE ${id(modelName)}
-      SET ${set(input)}
-      WHERE ${where(args.where, { model, columnExpr: toColumnExpr })}
-    `;
+    const query = buildUpdateSql({
+      table: modelName,
+      setClause: set(input),
+      whereClause: where(args.where, { model, columnExpr: toColumnExpr }),
+    });
 
     const res = await this.executor.run(query);
     return res.changes;
@@ -499,7 +496,7 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const updateFields = Object.keys(updateRow);
     const primaryKeyFieldNames = getPrimaryKeyFieldNames(model);
 
-    const action =
+    const onConflictAction =
       updateFields.length === 0
         ? sql`DO NOTHING`
         : args.where
@@ -514,12 +511,14 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
       values.push(insertRow[createFields[i]!]);
     }
 
-    const query = sql`
-      INSERT INTO ${id(modelName)} (${id(createFields)})
-      VALUES (${placeholders(values)})
-      ON CONFLICT (${id(primaryKeyFieldNames)}) ${action}
-      RETURNING ${select && select.length > 0 ? id(select) : raw("*")}
-    `;
+    const query = buildUpsertSql({
+      table: modelName,
+      fields: createFields,
+      values,
+      conflictColumns: primaryKeyFieldNames,
+      onConflictAction,
+      returning: select,
+    });
 
     const row = await this.executor.get(query);
     if (row !== undefined && row !== null) {
@@ -541,10 +540,10 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
   >(args: { model: K; where: Where<T> }): Promise<void> {
     const { model: modelName } = args;
     const model = this.schema[modelName]!;
-    const query = sql`
-      DELETE FROM ${id(modelName)}
-      WHERE ${where(args.where, { model, columnExpr: toColumnExpr })}
-    `;
+    const query = buildDeleteSql({
+      table: modelName,
+      whereClause: where(args.where, { model, columnExpr: toColumnExpr }),
+    });
     await this.executor.run(query);
   }
 
@@ -554,10 +553,10 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
   >(args: { model: K; where?: Where<T> }): Promise<number> {
     const { model: modelName } = args;
     const model = this.schema[modelName]!;
-    const query = sql`
-      DELETE FROM ${id(modelName)}
-      WHERE ${where(args.where, { model, columnExpr: toColumnExpr })}
-    `;
+    const query = buildDeleteSql({
+      table: modelName,
+      whereClause: where(args.where, { model, columnExpr: toColumnExpr }),
+    });
     const res = await this.executor.run(query);
     return res.changes;
   }
@@ -568,11 +567,10 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
   >(args: { model: K; where?: Where<T> }): Promise<number> {
     const { model: modelName } = args;
     const model = this.schema[modelName]!;
-    const query = sql`
-      SELECT COUNT(*) as count
-      FROM ${id(modelName)}
-      WHERE ${where(args.where, { model, columnExpr: toColumnExpr })}
-    `;
+    const query = buildCountSql({
+      table: modelName,
+      whereClause: where(args.where, { model, columnExpr: toColumnExpr }),
+    });
     const row = await this.executor.get(query);
     return Number(row?.["count"] ?? 0);
   }
