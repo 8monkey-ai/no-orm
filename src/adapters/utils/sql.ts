@@ -90,20 +90,16 @@ export function id(val: string | readonly string[], quoteChar = '"'): Sql {
   const regex = new RegExp(quoteChar, "g");
   const escape = quoteChar + quoteChar;
 
-  if (Array.isArray(val)) {
-    let res = "";
-    for (let i = 0; i < val.length; i++) {
-      if (i > 0) res += ", ";
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val[i] is a string from readonly string[]
-      const s = val[i] as string;
-      res += quoteChar + s.replace(regex, escape) + quoteChar;
-    }
-    return raw(res);
+  if (typeof val === "string") {
+    return raw(quoteChar + val.replace(regex, escape) + quoteChar);
   }
 
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val is a string here
-  const s = val as string;
-  return raw(quoteChar + s.replace(regex, escape) + quoteChar);
+  let res = "";
+  for (let i = 0; i < val.length; i++) {
+    if (i > 0) res += ", ";
+    res += quoteChar + val[i]!.replace(regex, escape) + quoteChar;
+  }
+  return raw(res);
 }
 
 /**

@@ -165,8 +165,8 @@ function isSyncSqlite(driver: SqliteDriver): driver is BunDatabase | BetterSqlit
 }
 
 type SyncStatement = {
-  all(...params: unknown[]): unknown[];
-  get(...params: unknown[]): unknown;
+  all(...params: unknown[]): Record<string, unknown>[];
+  get(...params: unknown[]): Record<string, unknown> | undefined;
   run(...params: unknown[]): { changes: number };
 };
 
@@ -193,15 +193,11 @@ function createSyncSqliteExecutor(driver: SyncDriver, inTransaction = false): Qu
   return {
     all: (query: Sql) => {
       const sqlStr = query.compile("?");
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver result row matches Record shape
-      return Promise.resolve(getPrepared(sqlStr).all(...query.params) as Record<string, unknown>[]);
+      return Promise.resolve(getPrepared(sqlStr).all(...query.params));
     },
     get: (query: Sql) => {
       const sqlStr = query.compile("?");
-      return Promise.resolve(
-        // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver returns either a row object or undefined
-        getPrepared(sqlStr).get(...query.params) as Record<string, unknown> | undefined,
-      );
+      return Promise.resolve(getPrepared(sqlStr).get(...query.params));
     },
     run: (query: Sql) => {
       const sqlStr = query.compile("?");

@@ -412,7 +412,6 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     sortBy: SortBy<T>[],
   ): RowData[] {
     const sorted = results.slice();
-    // eslint-disable-next-line unicorn/no-array-sort -- sorting a shallow copy
     sorted.sort((a, b) => {
       for (let i = 0; i < sortBy.length; i++) {
         const s = sortBy[i]!;
