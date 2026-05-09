@@ -29,7 +29,6 @@ import {
   sql,
   raw,
   id,
-  placeholders,
   where,
   set,
   sort,
@@ -74,21 +73,14 @@ function mapFromRecord<T extends Record<string, unknown>>(
   return record as T;
 }
 
-function mapToRecord(model: Model, data: Record<string, unknown>): Record<string, unknown> {
-  const fields = model.fields;
+function mapToRecord(_model: Model, data: Record<string, unknown>): Record<string, unknown> {
   const res: Record<string, unknown> = {};
   const keys = Object.keys(data);
   for (let i = 0; i < keys.length; i++) {
     const k = keys[i]!;
     const val = data[k];
     if (val === undefined) continue;
-    const field = fields[k];
-    // Postgres drivers handle JS objects for jsonb, but json[] often requires stringification
-    if (field?.type === "json[]" && val !== null) {
-      res[k] = JSON.stringify(val);
-    } else {
-      res[k] = val;
-    }
+    res[k] = val;
   }
   return res;
 }
@@ -121,7 +113,14 @@ function toColumnExpr(model: Model, fieldName: string, path?: string[], value?: 
   const isNumeric = typeof value === "number";
   const isBoolean = typeof value === "boolean";
 
-  let res = sql`jsonb_extract_path_text(${id(fieldName)}, ${placeholders(path)})`;
+  // Path elements are developer-controlled identifiers; inline as SQL literals to avoid
+  // VARIADIC parameterization issues with postgres.js and Bun SQL drivers.
+  let pathLiterals = "";
+  for (let i = 0; i < path.length; i++) {
+    pathLiterals += `, '${path[i]!}'`;
+  }
+
+  let res = sql`jsonb_extract_path_text(${id(fieldName)}${raw(pathLiterals)})`;
   if (isNumeric) {
     res = sql`(${res})::double precision`;
   } else if (isBoolean) {
@@ -226,7 +225,12 @@ function createPgExecutor(
   function getPrepared(query: Sql) {
     // pg needs a single string with $1, $2 placeholders
     const text = query.compile((i) => "$" + (i + 1));
-    const values = query.params;
+    // pg driver can't bind native objects/arrays for JSONB; stringify them explicitly
+    const values = query.params.map((v) =>
+      v !== null && typeof v === "object" && !(v instanceof Date) && !(v instanceof Uint8Array)
+        ? JSON.stringify(v)
+        : v,
+    );
 
     const name = `q_${createHash("sha1").update(text).digest("hex").slice(0, 16)}`;
     return { name, text, values };

@@ -28,7 +28,6 @@ describe("MemoryAdapter", () => {
   } as const satisfies Schema;
 
   type User = InferModel<typeof schema.users>;
-  type Item = InferModel<typeof schema.items>;
 
   let adapter: MemoryAdapter<typeof schema>;
 
@@ -92,7 +91,7 @@ describe("MemoryAdapter", () => {
       data: { group_id: "g1", item_id: "i2", value: 20, created_at: 2000 },
     });
 
-    const found = await adapter.find<"items", Item>({
+    const found = await adapter.find({
       model: "items",
       where: {
         and: [
@@ -101,7 +100,7 @@ describe("MemoryAdapter", () => {
         ],
       },
     });
-    expect(found?.value).toBe(20);
+    expect(found?.["value"]).toBe(20);
 
     const all = await adapter.findMany({ model: "items" });
     expect(all).toHaveLength(2);
@@ -115,7 +114,7 @@ describe("MemoryAdapter", () => {
       data: { id: "u1", name: "Alice", age: 25, is_active: true, metadata: null },
     });
 
-    const found = await adapter.find<"users", User>({
+    const found = await adapter.find({
       model: "users",
       where: { field: "id", op: "eq", value: "u1" },
       select: ["id", "name"],
@@ -142,15 +141,15 @@ describe("MemoryAdapter", () => {
       data: { id: "u3", name: "Charlie", age: 35, is_active: true, metadata: null },
     });
 
-    const actives = await adapter.findMany<"users", User>({
+    const actives = await adapter.findMany({
       model: "users",
       where: { field: "is_active", op: "eq", value: true },
       sortBy: [{ field: "age", direction: "asc" }],
     });
 
     expect(actives).toHaveLength(2);
-    expect(actives[0]?.name).toBe("Alice");
-    expect(actives[1]?.name).toBe("Charlie");
+    expect(actives[0]?.["name"]).toBe("Alice");
+    expect(actives[1]?.["name"]).toBe("Charlie");
   });
 
   it("should return empty array when no records match", async () => {
@@ -246,13 +245,13 @@ describe("MemoryAdapter", () => {
       },
     });
 
-    const darkThemeUsers = await adapter.findMany<"users", User>({
+    const darkThemeUsers = await adapter.findMany({
       model: "users",
       where: { field: "metadata", path: ["settings", "theme"], op: "eq", value: "dark" },
     });
 
     expect(darkThemeUsers).toHaveLength(1);
-    expect(darkThemeUsers[0]?.name).toBe("Alice");
+    expect(darkThemeUsers[0]?.["name"]).toBe("Alice");
   });
 
   // --- Update ---
@@ -269,12 +268,12 @@ describe("MemoryAdapter", () => {
       data: { age: 26 },
     });
 
-    const updated = await adapter.find<"users", User>({
+    const updated = await adapter.find({
       model: "users",
       where: { field: "id", op: "eq", value: "u1" },
     });
 
-    expect(updated?.age).toBe(26);
+    expect(updated?.["age"]).toBe(26);
   });
 
   it("should reject primary key updates", async () => {
@@ -284,7 +283,7 @@ describe("MemoryAdapter", () => {
     });
 
     expect(() =>
-      adapter.update<"users", User>({
+      adapter.update({
         model: "users",
         where: { field: "id", op: "eq", value: "u1" },
         data: { id: "u2" },
@@ -324,17 +323,17 @@ describe("MemoryAdapter", () => {
     });
     expect(count).toBe(2);
 
-    const alice = await adapter.find<"users", User>({
+    const alice = await adapter.find({
       model: "users",
       where: { field: "id", op: "eq", value: "u1" },
     });
-    expect(alice?.age).toBe(99);
+    expect(alice?.["age"]).toBe(99);
 
-    const charlie = await adapter.find<"users", User>({
+    const charlie = await adapter.find({
       model: "users",
       where: { field: "id", op: "eq", value: "u3" },
     });
-    expect(charlie?.age).toBe(35); // unchanged
+    expect(charlie?.["age"]).toBe(35); // unchanged
   });
 
   // --- Delete ---
@@ -456,11 +455,11 @@ describe("MemoryAdapter", () => {
       model: "users",
       data: { id: "u4", name: "NullUser", age: 40, is_active: true, metadata: null, tags: null },
     });
-    const users = await adapter.findMany<"users", User>({
+    const users = await adapter.findMany({
       model: "users",
       where: { field: "metadata", op: "eq", value: null },
     });
-    expect(users.find((u) => u.id === "u4")).toBeDefined();
+    expect(users.find((u) => u["id"] === "u4")).toBeDefined();
   });
 
   it("should filter by null inequality (op: ne, value: null)", async () => {
@@ -478,12 +477,12 @@ describe("MemoryAdapter", () => {
         metadata: { has_data: true },
       },
     });
-    const users = await adapter.findMany<"users", User>({
+    const users = await adapter.findMany({
       model: "users",
       where: { field: "metadata", op: "ne", value: null },
     });
-    expect(users.find((u) => u.id === "u5")).toBeDefined();
-    expect(users.find((u) => u.id === "u4")).toBeUndefined();
+    expect(users.find((u) => u["id"] === "u5")).toBeDefined();
+    expect(users.find((u) => u["id"] === "u4")).toBeUndefined();
   });
 
   // --- Upsert ---
@@ -499,30 +498,30 @@ describe("MemoryAdapter", () => {
       };
 
       // 1. Insert because it doesn't exist
-      await adapter.upsert<"users", User>({
+      await adapter.upsert({
         model: "users",
         create: userData,
         update: { age: 30 },
       });
 
-      let found = await adapter.find<"users", User>({
+      let found = await adapter.find({
         model: "users",
         where: { field: "id", op: "eq", value: "u1" },
       });
-      expect(found?.age).toBe(25); // Should have used 'create' data
+      expect(found?.["age"]).toBe(25); // Should have used 'create' data
 
       // 2. Update because it exists
-      await adapter.upsert<"users", User>({
+      await adapter.upsert({
         model: "users",
         create: userData,
         update: { age: 31 },
       });
 
-      found = await adapter.find<"users", User>({
+      found = await adapter.find({
         model: "users",
         where: { field: "id", op: "eq", value: "u1" },
       });
-      expect(found?.age).toBe(31); // Should have used 'update' data
+      expect(found?.["age"]).toBe(31); // Should have used 'update' data
     });
 
     it("should support predicated upsert", async () => {
@@ -537,32 +536,32 @@ describe("MemoryAdapter", () => {
       await adapter.create({ model: "users", data: userData });
 
       // Condition fails, no update
-      await adapter.upsert<"users", User>({
+      await adapter.upsert({
         model: "users",
         create: userData,
         update: { age: 30 },
         where: { field: "age", op: "gt", value: 40 },
       });
 
-      let found = await adapter.find<"users", User>({
+      let found = await adapter.find({
         model: "users",
         where: { field: "id", op: "eq", value: "u1" },
       });
-      expect(found?.age).toBe(25);
+      expect(found?.["age"]).toBe(25);
 
       // Condition passes, update happens
-      await adapter.upsert<"users", User>({
+      await adapter.upsert({
         model: "users",
         create: userData,
         update: { age: 30 },
         where: { field: "age", op: "lt", value: 40 },
       });
 
-      found = await adapter.find<"users", User>({
+      found = await adapter.find({
         model: "users",
         where: { field: "id", op: "eq", value: "u1" },
       });
-      expect(found?.age).toBe(30);
+      expect(found?.["age"]).toBe(30);
     });
 
     it("should throw error if primary key is missing in 'create' data", () => {

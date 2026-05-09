@@ -114,6 +114,10 @@ export function mapNumeric(value: unknown): number | null {
 
 // --- Value & Comparison Helpers ---
 
+function isRecord(val: unknown): val is Record<string, unknown> {
+  return typeof val === "object" && val !== null;
+}
+
 /**
  * Extracts a value from a record, supporting nested JSON paths.
  */
@@ -125,9 +129,8 @@ export function getNestedValue(
   let val: unknown = record[field];
   if (path !== undefined && path.length > 0) {
     for (let i = 0; i < path.length; i++) {
-      if (typeof val !== "object" || val === null || Array.isArray(val)) return undefined;
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- val is checked to be an object and not null above
-      val = (val as Record<string, unknown>)[path[i]!];
+      if (!isRecord(val)) return undefined;
+      val = val[path[i]!];
     }
   }
   return val;

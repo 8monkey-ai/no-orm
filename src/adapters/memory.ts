@@ -72,7 +72,9 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     const pkValue = this.getPrimaryKeyHash(model, data);
 
     if (pkIndex.has(pkValue)) {
-      throw new Error(`Record with primary key ${pkValue} already exists in ${model}`);
+      return Promise.reject(
+        new Error(`Record with primary key ${pkValue} already exists in ${model}`),
+      );
     }
 
     const record: RowData = Object.assign({}, data);
@@ -350,6 +352,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
       or: (children) => children.some(Boolean),
       leaf: (c) => {
         const recordVal = getNestedValue(record, c.field, c.path);
+        const op: string = c.op;
         switch (c.op) {
           case "eq":
             return recordVal === c.value;
@@ -368,10 +371,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
           case "not_in":
             return !c.value.includes(recordVal);
           default:
-            // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- accessing op for error message
-            throw new Error(
-              `Unsupported operator: ${String((c as Record<string, unknown>)["op"])}`,
-            );
+            throw new Error(`Unsupported operator: ${op}`);
         }
       },
     });

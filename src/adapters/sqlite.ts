@@ -221,11 +221,13 @@ function createSyncSqliteExecutor(driver: SyncDriver, inTransaction = false): Qu
 
 function createAsyncSqliteExecutor(driver: SqliteDatabase, inTransaction = false): QueryExecutor {
   return {
-    // eslint-disable-next-line typescript-eslint/no-unsafe-return -- async driver returns rows
     all: (query: Sql) => driver.all(query.compile("?"), query.params),
-    // eslint-disable-next-line typescript-eslint/no-unsafe-return -- async driver returns row
     get: (query: Sql) => driver.get(query.compile("?"), query.params),
     run: async (query: Sql) => {
+      if (query.params.length === 0) {
+        await driver.exec(query.compile("?"));
+        return { changes: 0 };
+      }
       const res = await driver.run(query.compile("?"), query.params);
       return { changes: res.changes ?? 0 };
     },

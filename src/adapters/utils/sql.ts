@@ -18,8 +18,7 @@ export class Sql {
   toTaggedArgs(): [TemplateStringsArray, ...unknown[]] {
     // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- augmenting array to satisfy TemplateStringsArray contract
     const strings = this.strings as string[] & { raw: readonly string[] };
-    // eslint-disable-next-line typescript-eslint/no-unnecessary-condition -- raw may be missing if not already augmented
-    strings.raw ??= this.strings;
+    strings.raw = this.strings;
     return [strings as TemplateStringsArray, ...this.params];
   }
 
@@ -129,8 +128,10 @@ export function isQueryExecutor(obj: unknown): obj is QueryExecutor {
   return (
     "all" in obj &&
     "run" in obj &&
+    "transaction" in obj &&
     typeof (obj as Record<string, unknown>)["all"] === "function" &&
-    typeof (obj as Record<string, unknown>)["run"] === "function"
+    typeof (obj as Record<string, unknown>)["run"] === "function" &&
+    typeof (obj as Record<string, unknown>)["transaction"] === "function"
   );
 }
 
@@ -191,6 +192,7 @@ function buildWhere<T>(clause: Where<T>, options: WhereOptions): Sql {
       const expr = options.columnExpr(options.model, c.field as string, c.path, c.value);
       const field = options.model.fields[c.field as string];
       const mapped = options.mapValue ? options.mapValue(c.value, field) : c.value;
+      const op: string = c.op;
 
       switch (c.op) {
         case "eq":
@@ -228,8 +230,7 @@ function buildWhere<T>(clause: Where<T>, options: WhereOptions): Sql {
           return sql`${expr} NOT IN (${placeholders(params)})`;
         }
         default:
-          // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- accessing op for error message
-          throw new Error(`Unsupported operator: ${String((c as Record<string, unknown>)["op"])}`);
+          throw new Error(`Unsupported operator: ${op}`);
       }
     },
   });
@@ -277,7 +278,11 @@ export function sort<T>(model: Model, sortBy: SortBy<T>[], columnExpr: ColumnExp
   const parts: Sql[] = [];
   for (let i = 0; i < sortBy.length; i++) {
     const s = sortBy[i]!;
-    const expr = columnExpr(model, s.field as string, s.path);
+    // Pass a type-representative sentinel so columnExpr can apply the right SQL cast
+    // (e.g. ::double precision for number/timestamp, ::boolean for boolean).
+    const typeValue: unknown =
+      s.type === "number" || s.type === "timestamp" ? 0 : s.type === "boolean" ? true : undefined;
+    const expr = columnExpr(model, s.field as string, s.path, typeValue);
     const dir = (s.direction ?? "asc").toUpperCase();
     parts.push(sql`${expr} ${raw(dir)}`);
   }

@@ -174,12 +174,14 @@ export type Where<T = Record<string, unknown>> =
   | {
       field: FieldName<T>;
       path?: string[];
+      type?: FieldType;
       op: "eq" | "ne" | "gt" | "gte" | "lt" | "lte";
       value: unknown;
     }
   | {
       field: FieldName<T>;
       path?: string[];
+      type?: FieldType;
       op: "in" | "not_in";
       value: unknown[];
     }
@@ -193,6 +195,7 @@ export type Where<T = Record<string, unknown>> =
 export interface SortBy<T = Record<string, unknown>> {
   field: FieldName<T>;
   path?: string[];
+  type?: FieldType;
   direction?: "asc" | "desc";
 }
 
