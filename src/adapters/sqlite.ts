@@ -268,50 +268,52 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
   }
 
   async migrate(): Promise<void> {
-    const models = Object.entries(this.schema);
+    await this.executor.transaction(async (exec) => {
+      const models = Object.entries(this.schema);
 
-    // Create tables first, then indexes — indexes depend on tables existing.
-    // DDL must be sequential: some drivers don't support concurrent DDL on one connection.
-    for (let i = 0; i < models.length; i++) {
-      const [name, model] = models[i]!;
-      const fields = Object.entries(model.fields);
-      const columnsList: Sql[] = [];
-      for (let j = 0; j < fields.length; j++) {
-        const [fname, f] = fields[j]!;
-        columnsList.push(
-          sql`${id(fname)} ${raw(sqlType(f))}${raw(f.nullable === true ? "" : " NOT NULL")}`,
-        );
-      }
-      const primaryKeyFieldNames = getPrimaryKeyFieldNames(model);
-      const pk = sql`PRIMARY KEY (${id(primaryKeyFieldNames)})`;
-      // eslint-disable-next-line no-await-in-loop -- DDL is intentionally sequential
-      await this.executor.run(sql`
-        CREATE TABLE IF NOT EXISTS ${id(name)} (
-          ${join(columnsList, ", ")},
-          ${pk}
-        )
-      `);
-    }
-
-    // Now create indexes
-    for (let i = 0; i < models.length; i++) {
-      const [name, model] = models[i]!;
-      if (!model.indexes) continue;
-      for (let j = 0; j < model.indexes.length; j++) {
-        const idx = model.indexes[j]!;
-        const fields = Array.isArray(idx.field) ? idx.field : [idx.field];
-        const formatted: Sql[] = [];
-        for (let k = 0; k < fields.length; k++) {
-          const f = fields[k]!;
-          formatted.push(sql`${id(f)}${raw(idx.order ? ` ${idx.order.toUpperCase()}` : "")}`);
+      // Create tables first, then indexes — indexes depend on tables existing.
+      // DDL must be sequential: some drivers don't support concurrent DDL on one connection.
+      for (let i = 0; i < models.length; i++) {
+        const [name, model] = models[i]!;
+        const fields = Object.entries(model.fields);
+        const columnsList: Sql[] = [];
+        for (let j = 0; j < fields.length; j++) {
+          const [fname, f] = fields[j]!;
+          columnsList.push(
+            sql`${id(fname)} ${raw(sqlType(f))}${raw(f.nullable === true ? "" : " NOT NULL")}`,
+          );
         }
+        const primaryKeyFieldNames = getPrimaryKeyFieldNames(model);
+        const pk = sql`PRIMARY KEY (${id(primaryKeyFieldNames)})`;
         // eslint-disable-next-line no-await-in-loop -- DDL is intentionally sequential
-        await this.executor.run(sql`
-          CREATE INDEX IF NOT EXISTS ${id(`idx_${name}_${j}`)}
-          ON ${id(name)} (${join(formatted, ", ")})
+        await exec.run(sql`
+          CREATE TABLE IF NOT EXISTS ${id(name)} (
+            ${join(columnsList, ", ")},
+            ${pk}
+          )
         `);
       }
-    }
+
+      // Now create indexes
+      for (let i = 0; i < models.length; i++) {
+        const [name, model] = models[i]!;
+        if (!model.indexes) continue;
+        for (let j = 0; j < model.indexes.length; j++) {
+          const idx = model.indexes[j]!;
+          const fields = Array.isArray(idx.field) ? idx.field : [idx.field];
+          const formatted: Sql[] = [];
+          for (let k = 0; k < fields.length; k++) {
+            const f = fields[k]!;
+            formatted.push(sql`${id(f)}${raw(idx.order ? ` ${idx.order.toUpperCase()}` : "")}`);
+          }
+          // eslint-disable-next-line no-await-in-loop -- DDL is intentionally sequential
+          await exec.run(sql`
+            CREATE INDEX IF NOT EXISTS ${id(`idx_${name}_${j}`)}
+            ON ${id(name)} (${join(formatted, ", ")})
+          `);
+        }
+      }
+    });
   }
 
   transaction<T>(fn: (tx: Adapter<S>) => Promise<T>): Promise<T> {
