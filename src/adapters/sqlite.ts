@@ -160,8 +160,12 @@ function toColumnExpr(model: Model, fieldName: string, path?: string[]): Sql {
 
 // --- Driver detection and executors ---
 
-function isSyncSqlite(driver: SqliteDriver): driver is BunDatabase | BetterSqlite3Database {
-  return "prepare" in driver && !("all" in driver);
+function isBunSqlite(driver: SqliteDriver): driver is BunDatabase {
+  return "query" in driver && !("all" in driver);
+}
+
+function isBetterSqlite3(driver: SqliteDriver): driver is BetterSqlite3Database {
+  return "prepare" in driver && !("all" in driver) && !("query" in driver);
 }
 
 type SyncStatement = {
@@ -170,46 +174,26 @@ type SyncStatement = {
   run(...params: unknown[]): { changes: number };
 };
 
-interface SyncDriver {
-  prepare(sql: string): SyncStatement;
-}
-
-function createSyncSqliteExecutor(driver: SyncDriver, inTransaction = false): QueryExecutor {
-  const cache = new Map<string, SyncStatement>();
-
+function createBunSqliteExecutor(driver: BunDatabase, inTransaction = false): QueryExecutor {
   function getPrepared(sqlStr: string): SyncStatement {
-    let stmt = cache.get(sqlStr);
-    if (stmt === undefined) {
-      if (cache.size >= MAX_CACHED_STATEMENTS) {
-        const first = cache.keys().next();
-        if (first.done !== true) cache.delete(first.value);
-      }
-      stmt = driver.prepare(sqlStr);
-      cache.set(sqlStr, stmt);
-    }
-    return stmt;
+    // driver.query() caches at the BunDatabase level — no manual Map needed
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- bun:sqlite Statement structurally matches SyncStatement; run() returns {changes} at runtime despite void TypeScript type
+    return driver.query(sqlStr) as unknown as SyncStatement;
   }
 
   return {
-    all: (query: Sql) => {
-      const sqlStr = query.compile("?");
-      return Promise.resolve(getPrepared(sqlStr).all(...query.params));
-    },
-    get: (query: Sql) => {
-      const sqlStr = query.compile("?");
-      return Promise.resolve(getPrepared(sqlStr).get(...query.params));
-    },
+    all: (query: Sql) => Promise.resolve(getPrepared(query.compile("?")).all(...query.params)),
+    get: (query: Sql) => Promise.resolve(getPrepared(query.compile("?")).get(...query.params)),
     run: (query: Sql) => {
-      const sqlStr = query.compile("?");
-      const res = getPrepared(sqlStr).run(...query.params);
+      const res = getPrepared(query.compile("?")).run(...query.params);
       return Promise.resolve({ changes: res.changes });
     },
     transaction: async (fn) => {
       getPrepared("BEGIN").run();
       try {
-        const res = await fn(createSyncSqliteExecutor(driver, true));
+        const result = await fn(createBunSqliteExecutor(driver, true));
         getPrepared("COMMIT").run();
-        return res;
+        return result;
       } catch (e) {
         getPrepared("ROLLBACK").run();
         throw e;
@@ -219,7 +203,48 @@ function createSyncSqliteExecutor(driver: SyncDriver, inTransaction = false): Qu
   };
 }
 
-function createAsyncSqliteExecutor(driver: SqliteDatabase, inTransaction = false): QueryExecutor {
+function createBetterSqlite3Executor(
+  driver: BetterSqlite3Database,
+  inTransaction = false,
+  cache = new Map<string, SyncStatement>(),
+): QueryExecutor {
+  function getPrepared(sqlStr: string): SyncStatement {
+    let stmt = cache.get(sqlStr);
+    if (stmt === undefined) {
+      if (cache.size >= MAX_CACHED_STATEMENTS) {
+        const first = cache.keys().next();
+        if (first.done !== true) cache.delete(first.value);
+      }
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- better-sqlite3 Statement structurally matches SyncStatement
+      stmt = driver.prepare(sqlStr) as unknown as SyncStatement;
+      cache.set(sqlStr, stmt);
+    }
+    return stmt;
+  }
+
+  return {
+    all: (query: Sql) => Promise.resolve(getPrepared(query.compile("?")).all(...query.params)),
+    get: (query: Sql) => Promise.resolve(getPrepared(query.compile("?")).get(...query.params)),
+    run: (query: Sql) => {
+      const res = getPrepared(query.compile("?")).run(...query.params);
+      return Promise.resolve({ changes: res.changes });
+    },
+    transaction: async (fn) => {
+      getPrepared("BEGIN").run();
+      try {
+        const result = await fn(createBetterSqlite3Executor(driver, true, cache));
+        getPrepared("COMMIT").run();
+        return result;
+      } catch (e) {
+        getPrepared("ROLLBACK").run();
+        throw e;
+      }
+    },
+    inTransaction,
+  };
+}
+
+function createSqliteExecutor(driver: SqliteDatabase, inTransaction = false): QueryExecutor {
   return {
     all: (query: Sql) => driver.all(query.compile("?"), query.params),
     get: (query: Sql) => driver.get(query.compile("?"), query.params),
@@ -234,7 +259,7 @@ function createAsyncSqliteExecutor(driver: SqliteDatabase, inTransaction = false
     transaction: async (fn) => {
       await driver.run("BEGIN");
       try {
-        const res = await fn(createAsyncSqliteExecutor(driver, true));
+        const res = await fn(createSqliteExecutor(driver, true));
         await driver.run("COMMIT");
         return res;
       } catch (e) {
@@ -246,10 +271,10 @@ function createAsyncSqliteExecutor(driver: SqliteDatabase, inTransaction = false
   };
 }
 
-function createSqliteExecutor(driver: SqliteDriver): QueryExecutor {
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- bridges narrowed driver type to internal structural SyncDriver shape
-  if (isSyncSqlite(driver)) return createSyncSqliteExecutor(driver as SyncDriver);
-  return createAsyncSqliteExecutor(driver);
+function createExecutor(driver: SqliteDriver): QueryExecutor {
+  if (isBunSqlite(driver)) return createBunSqliteExecutor(driver);
+  if (isBetterSqlite3(driver)) return createBetterSqlite3Executor(driver);
+  return createSqliteExecutor(driver);
 }
 
 // --- Adapter ---
@@ -264,7 +289,7 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     private schema: S,
     driver: SqliteDriver | QueryExecutor,
   ) {
-    this.executor = isQueryExecutor(driver) ? driver : createSqliteExecutor(driver);
+    this.executor = isQueryExecutor(driver) ? driver : createExecutor(driver);
   }
 
   async migrate(): Promise<void> {

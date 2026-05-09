@@ -146,19 +146,25 @@ function isPg(driver: PostgresDriver): driver is PgClient | PgPool | PgPoolClien
 const isPgPool = (d: PgClient | PgPool | PgPoolClient): d is PgPool =>
   "connect" in d && !("release" in d);
 
+// --- Driver result types ---
+// postgres.js and Bun SQL attach metadata (affected row count, command) to the result array object itself.
+type PostgresJsResult = Record<string, unknown>[] & { count?: number };
+type BunSqlResult = Record<string, unknown>[] & {
+  affectedRows?: number;
+  count?: number;
+  command?: string;
+};
+
 // --- Executor factories ---
 
 function createPostgresJsExecutor(
   driver: postgres.Sql | postgres.TransactionSql,
   inTransaction = false,
 ): QueryExecutor {
-  const runQuery = (query: Sql) => {
+  const runQuery = (query: Sql): Promise<PostgresJsResult> => {
     const [strings, ...params] = query.toTaggedArgs();
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- calling driver as tagged template function to avoid .unsafe()
-    const run = driver as (
-      s: TemplateStringsArray,
-      ...p: unknown[]
-    ) => Promise<Record<string, unknown>[]>;
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- calling driver as tagged template function to avoid .unsafe(); result has .count on the array object
+    const run = driver as (s: TemplateStringsArray, ...p: unknown[]) => Promise<PostgresJsResult>;
     return run(strings, ...params);
   };
 
@@ -172,9 +178,7 @@ function createPostgresJsExecutor(
     },
     run: async (query) => {
       const rows = await runQuery(query);
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- postgres.js returns result with .count
-      const r = rows as unknown as { count?: number };
-      return { changes: r.count ?? 0 };
+      return { changes: rows.count ?? 0 };
     },
     transaction: <T>(fn: (executor: QueryExecutor) => Promise<T>) => {
       // PostgresAdapter.transaction() short-circuits nested calls with `if (this.executor.inTransaction) return fn(this)`.
@@ -190,9 +194,10 @@ function createPostgresJsExecutor(
 }
 
 function createBunSqlExecutor(bunSql: BunSQL, inTransaction = false): QueryExecutor {
-  const runQuery = (query: Sql) => {
+  const runQuery = (query: Sql): Promise<BunSqlResult> => {
     const [strings, ...params] = query.toTaggedArgs();
-    return bunSql(strings, ...params) as Promise<Record<string, unknown>[]>;
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- bun:sql result has affectedRows/count/command on the array object
+    return bunSql(strings, ...params) as Promise<BunSqlResult>;
   };
 
   return {
@@ -203,11 +208,9 @@ function createBunSqlExecutor(bunSql: BunSQL, inTransaction = false): QueryExecu
     },
     run: async (query) => {
       const rows = await runQuery(query);
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- driver result has count/affectedRows/command
-      const r = rows as unknown as { affectedRows?: number; count?: number; command?: string };
-      let changes = r.affectedRows ?? r.count ?? 0;
-      if (changes === 0 && r.command !== undefined && r.command.startsWith("OK ")) {
-        const parsed = parseInt(r.command.slice(3), 10);
+      let changes = rows.affectedRows ?? rows.count ?? 0;
+      if (changes === 0 && rows.command !== undefined && rows.command.startsWith("OK ")) {
+        const parsed = parseInt(rows.command.slice(3), 10);
         if (!isNaN(parsed)) changes = parsed;
       }
       return { changes };
