@@ -227,6 +227,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     select?: Select<T>;
   }): Promise<T> {
     const { model, create, update, where, select } = args;
+    assertNoPrimaryKeyUpdates(this.schema[model]!, update as Record<string, unknown>);
     const pkValue = this.getPrimaryKeyHash(model, create);
     const existing = this.pkIndexes.get(model)!.get(pkValue);
 

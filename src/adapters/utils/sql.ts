@@ -86,17 +86,14 @@ export function sql(strings: TemplateStringsArray, ...values: unknown[]): Sql {
 export function id(val: string | readonly string[], quoteChar = '"'): Sql {
   if (val === "" || (Array.isArray(val) && val.length === 0)) return raw("");
 
-  const regex = new RegExp(quoteChar, "g");
-  const escape = quoteChar + quoteChar;
-
   if (typeof val === "string") {
-    return raw(quoteChar + val.replace(regex, escape) + quoteChar);
+    return raw(quoteChar + val + quoteChar);
   }
 
   let res = "";
   for (let i = 0; i < val.length; i++) {
     if (i > 0) res += ", ";
-    res += quoteChar + val[i]!.replace(regex, escape) + quoteChar;
+    res += quoteChar + val[i]! + quoteChar;
   }
   return raw(res);
 }

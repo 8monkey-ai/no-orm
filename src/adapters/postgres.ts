@@ -441,10 +441,12 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     if (fields.length === 0)
       return this.find({ model: modelName, where: args.where, select: undefined });
 
+    const whereClause = where(args.where, { model, columnExpr: toColumnExpr });
+    const singleRowWhere = sql`ctid = (SELECT ctid FROM ${id(modelName)} WHERE ${whereClause} LIMIT 1)`;
     const query = buildUpdateSql({
       table: modelName,
       setClause: set(input),
-      whereClause: where(args.where, { model, columnExpr: toColumnExpr }),
+      whereClause: singleRowWhere,
       returning: true,
     });
 
