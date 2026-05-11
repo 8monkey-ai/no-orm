@@ -1,5 +1,5 @@
-import type { Cursor, Field, Model, SortBy, Where } from "../../types";
-import { getPaginationFilter, walkWhere } from "./common";
+import type { Cursor, Field, Model, Schema, SortBy, Where } from "../../types";
+import { getPaginationFilter, getPrimaryKeyFieldNames, walkWhere } from "./common";
 
 /**
  * A Sql instance keeps SQL logic and dynamic data separate to prevent injection.
@@ -122,11 +122,15 @@ export interface QueryExecutor {
 
 export function isQueryExecutor(obj: unknown): obj is QueryExecutor {
   if (typeof obj !== "object" || obj === null) return false;
-  const rec = obj as Record<string, unknown>;
   return (
-    typeof rec["all"] === "function" &&
-    typeof rec["run"] === "function" &&
-    typeof rec["transaction"] === "function"
+    "all" in obj &&
+    typeof obj.all === "function" &&
+    "get" in obj &&
+    typeof obj.get === "function" &&
+    "run" in obj &&
+    typeof obj.run === "function" &&
+    "transaction" in obj &&
+    typeof obj.transaction === "function"
   );
 }
 
@@ -331,12 +335,7 @@ export function insertSql(opts: {
   return sql`INSERT INTO ${id(opts.table)} (${id(opts.fields)}) VALUES (${placeholders(opts.values)}) RETURNING ${cols}`;
 }
 
-export function updateSql(opts: {
-  table: string;
-  set: Sql;
-  where: Sql;
-  returning?: boolean;
-}): Sql {
+export function updateSql(opts: { table: string; set: Sql; where: Sql; returning?: boolean }): Sql {
   const base = sql`UPDATE ${id(opts.table)} SET ${opts.set} WHERE ${opts.where}`;
   return opts.returning === true ? sql`${base} RETURNING *` : base;
 }
@@ -359,4 +358,59 @@ export function upsertSql(opts: {
 
 export function countSql(opts: { table: string; where: Sql }): Sql {
   return sql`SELECT COUNT(*) as count FROM ${id(opts.table)} WHERE ${opts.where}`;
+}
+
+export function migrateSqls(
+  schema: Schema,
+  opts: {
+    sqlType: (field: Field) => string;
+    quoteChar?: string;
+    indexIfNotExists?: boolean;
+  },
+): Sql[] {
+  const q = opts.quoteChar ?? '"';
+  const ifNotExists = opts.indexIfNotExists ?? true;
+  const models = Object.entries(schema);
+  const stmts: Sql[] = [];
+
+  for (let i = 0; i < models.length; i++) {
+    const [name, model] = models[i]!;
+    const fields = Object.entries(model.fields);
+    const columnsList: Sql[] = [];
+    for (let j = 0; j < fields.length; j++) {
+      const [fname, f] = fields[j]!;
+      columnsList.push(
+        sql`${id(fname, q)} ${raw(opts.sqlType(f))}${raw(f.nullable === true ? "" : " NOT NULL")}`,
+      );
+    }
+    const pkFields = getPrimaryKeyFieldNames(model);
+    const pk = sql`PRIMARY KEY (${id(pkFields, q)})`;
+    stmts.push(sql`
+      CREATE TABLE IF NOT EXISTS ${id(name, q)} (
+        ${join(columnsList, ", ")},
+        ${pk}
+      )
+    `);
+  }
+
+  for (let i = 0; i < models.length; i++) {
+    const [name, model] = models[i]!;
+    if (!model.indexes) continue;
+    for (let j = 0; j < model.indexes.length; j++) {
+      const idx = model.indexes[j]!;
+      const fields = Array.isArray(idx.field) ? idx.field : [idx.field];
+      const formatted: Sql[] = [];
+      for (let k = 0; k < fields.length; k++) {
+        const f = fields[k]!;
+        formatted.push(sql`${id(f, q)}${raw(idx.order ? ` ${idx.order.toUpperCase()}` : "")}`);
+      }
+      const ifne = ifNotExists ? "IF NOT EXISTS " : "";
+      stmts.push(sql`
+        CREATE INDEX ${raw(ifne)}${id(`idx_${name}_${j}`, q)}
+        ON ${id(name, q)} (${join(formatted, ", ")})
+      `);
+    }
+  }
+
+  return stmts;
 }
