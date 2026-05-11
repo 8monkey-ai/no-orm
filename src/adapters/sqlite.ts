@@ -32,15 +32,13 @@ import {
   set,
   sort,
   join,
-} from "./utils/sql";
-import {
   selectSql,
   insertSql,
   updateSql,
   deleteSql,
   upsertSql,
   countSql,
-} from "./utils/statements";
+} from "./utils/sql";
 
 export type SqliteDriver = SqliteDatabase | BunDatabase | BetterSqlite3Database;
 

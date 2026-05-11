@@ -34,15 +34,13 @@ import {
   sort,
   join,
   stringifyJsonParam,
-} from "./utils/sql";
-import {
   selectSql,
   insertSql,
   updateSql,
   deleteSql,
   upsertSql,
   countSql,
-} from "./utils/statements";
+} from "./utils/sql";
 
 type PostgresJsSql = postgres.Sql;
 type TransactionSql = postgres.TransactionSql;
