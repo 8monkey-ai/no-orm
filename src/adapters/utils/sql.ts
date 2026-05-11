@@ -122,13 +122,11 @@ export interface QueryExecutor {
 
 export function isQueryExecutor(obj: unknown): obj is QueryExecutor {
   if (typeof obj !== "object" || obj === null) return false;
+  const rec = obj as Record<string, unknown>;
   return (
-    "all" in obj &&
-    "run" in obj &&
-    "transaction" in obj &&
-    typeof (obj as Record<string, unknown>)["all"] === "function" &&
-    typeof (obj as Record<string, unknown>)["run"] === "function" &&
-    typeof (obj as Record<string, unknown>)["transaction"] === "function"
+    typeof rec["all"] === "function" &&
+    typeof rec["run"] === "function" &&
+    typeof rec["transaction"] === "function"
   );
 }
 
@@ -189,7 +187,6 @@ function buildWhere<T>(clause: Where<T>, options: WhereOptions): Sql {
       const expr = options.columnExpr(options.model, c.field as string, c.path, c.value);
       const field = options.model.fields[c.field as string];
       const mapped = options.mapValue ? options.mapValue(c.value, field) : c.value;
-      const op: string = c.op;
 
       switch (c.op) {
         case "eq":
@@ -227,7 +224,7 @@ function buildWhere<T>(clause: Where<T>, options: WhereOptions): Sql {
           return sql`${expr} NOT IN (${placeholders(params)})`;
         }
         default:
-          throw new Error(`Unsupported operator: ${op}`);
+          throw new Error("Unsupported where operator");
       }
     },
   });

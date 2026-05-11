@@ -34,12 +34,12 @@ import {
   join,
 } from "./utils/sql";
 import {
-  buildSelectSql,
-  buildInsertSql,
-  buildUpdateSql,
-  buildDeleteSql,
-  buildUpsertSql,
-  buildCountSql,
+  selectSql,
+  insertSql,
+  updateSql,
+  deleteSql,
+  upsertSql,
+  countSql,
 } from "./utils/statements";
 
 export type SqliteDriver = SqliteDatabase | BunDatabase | BetterSqlite3Database;
@@ -358,7 +358,7 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     for (let i = 0; i < fields.length; i++) {
       values.push(input[fields[i]!]);
     }
-    const query = buildInsertSql({ table: modelName, fields, values, returning: select });
+    const query = insertSql({ table: modelName, fields, values, returning: select });
 
     const row = await this.executor.get(query);
     if (row === undefined || row === null) {
@@ -379,10 +379,10 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
   >(args: { model: K; where: Where<T>; select?: Select<T> }): Promise<T | null> {
     const { model: modelName, select } = args;
     const model = this.schema[modelName]!;
-    const query = buildSelectSql({
+    const query = selectSql({
       table: modelName,
       select,
-      whereClause: where(args.where, { model, columnExpr: toColumnExpr, mapValue: mapSqliteValue }),
+      where: where(args.where, { model, columnExpr: toColumnExpr, mapValue: mapSqliteValue }),
       limit: 1,
     });
 
@@ -405,17 +405,17 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
   }): Promise<T[]> {
     const { model: modelName, select, sortBy, limit, offset, cursor } = args;
     const model = this.schema[modelName]!;
-    const query = buildSelectSql({
+    const query = selectSql({
       table: modelName,
       select,
-      whereClause: where(args.where, {
+      where: where(args.where, {
         model,
         columnExpr: toColumnExpr,
         mapValue: mapSqliteValue,
         cursor,
         sortBy,
       }),
-      orderByClause: sortBy && sortBy.length > 0 ? sort(model, sortBy, toColumnExpr) : undefined,
+      orderBy: sortBy && sortBy.length > 0 ? sort(model, sortBy, toColumnExpr) : undefined,
       limit,
       offset,
     });
@@ -444,12 +444,14 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     if (fields.length === 0)
       return this.find({ model: modelName, where: args.where, select: undefined });
 
-    const whereClause = where(args.where, { model, columnExpr: toColumnExpr, mapValue: mapSqliteValue });
-    const singleRowWhere = sql`rowid = (SELECT rowid FROM ${id(modelName)} WHERE ${whereClause} LIMIT 1)`;
-    const query = buildUpdateSql({
+    const query = updateSql({
       table: modelName,
-      setClause: set(input),
-      whereClause: singleRowWhere,
+      set: set(input),
+      where: sql`rowid = (SELECT rowid FROM ${id(modelName)} WHERE ${where(args.where, {
+        model,
+        columnExpr: toColumnExpr,
+        mapValue: mapSqliteValue,
+      })} LIMIT 1)`,
       returning: true,
     });
 
@@ -473,10 +475,10 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     const fields = Object.keys(input);
     if (fields.length === 0) return 0;
 
-    const query = buildUpdateSql({
+    const query = updateSql({
       table: modelName,
-      setClause: set(input),
-      whereClause: where(args.where, { model, columnExpr: toColumnExpr, mapValue: mapSqliteValue }),
+      set: set(input),
+      where: where(args.where, { model, columnExpr: toColumnExpr, mapValue: mapSqliteValue }),
     });
 
     const res = await this.executor.run(query);
@@ -510,7 +512,7 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     const updateFields = Object.keys(updateRow);
     const primaryKeyFieldNames = getPrimaryKeyFieldNames(model);
 
-    const onConflictAction =
+    const onConflict =
       updateFields.length === 0
         ? sql`DO NOTHING`
         : args.where
@@ -526,12 +528,12 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
       values.push(insertRow[createFields[i]!]);
     }
 
-    const query = buildUpsertSql({
+    const query = upsertSql({
       table: modelName,
       fields: createFields,
       values,
       conflictColumns: primaryKeyFieldNames,
-      onConflictAction,
+      onConflict,
       returning: select,
     });
 
@@ -555,9 +557,9 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
   >(args: { model: K; where: Where<T> }): Promise<void> {
     const { model: modelName } = args;
     const model = this.schema[modelName]!;
-    const query = buildDeleteSql({
+    const query = deleteSql({
       table: modelName,
-      whereClause: where(args.where, { model, columnExpr: toColumnExpr, mapValue: mapSqliteValue }),
+      where: where(args.where, { model, columnExpr: toColumnExpr, mapValue: mapSqliteValue }),
     });
     await this.executor.run(query);
   }
@@ -568,9 +570,9 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
   >(args: { model: K; where?: Where<T> }): Promise<number> {
     const { model: modelName } = args;
     const model = this.schema[modelName]!;
-    const query = buildDeleteSql({
+    const query = deleteSql({
       table: modelName,
-      whereClause: where(args.where, { model, columnExpr: toColumnExpr, mapValue: mapSqliteValue }),
+      where: where(args.where, { model, columnExpr: toColumnExpr, mapValue: mapSqliteValue }),
     });
     const res = await this.executor.run(query);
     return res.changes;
@@ -582,9 +584,9 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
   >(args: { model: K; where?: Where<T> }): Promise<number> {
     const { model: modelName } = args;
     const model = this.schema[modelName]!;
-    const query = buildCountSql({
+    const query = countSql({
       table: modelName,
-      whereClause: where(args.where, { model, columnExpr: toColumnExpr, mapValue: mapSqliteValue }),
+      where: where(args.where, { model, columnExpr: toColumnExpr, mapValue: mapSqliteValue }),
     });
     const row = await this.executor.get(query);
     return Number(row?.["count"] ?? 0);
