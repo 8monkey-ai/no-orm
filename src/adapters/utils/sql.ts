@@ -282,3 +282,15 @@ export function sort<T>(model: Model, sortBy: SortBy<T>[], columnExpr: ColumnExp
   }
   return join(parts, ", ");
 }
+
+/**
+ * Coerce a bind value for drivers whose binary protocol can't serialize
+ * objects/arrays natively (pg, mysql2). Date and Uint8Array pass through —
+ * those drivers handle them. Not needed for postgres.js / Bun:SQL, which
+ * accept objects via tagged-template binding.
+ */
+export function stringifyJsonParam(v: unknown): unknown {
+  return v !== null && typeof v === "object" && !(v instanceof Date) && !(v instanceof Uint8Array)
+    ? JSON.stringify(v)
+    : v;
+}

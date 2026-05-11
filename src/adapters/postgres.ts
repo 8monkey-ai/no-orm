@@ -33,6 +33,7 @@ import {
   set,
   sort,
   join,
+  stringifyJsonParam,
 } from "./utils/sql";
 import {
   selectSql,
@@ -226,15 +227,8 @@ function createPgExecutor(
   inTransaction = false,
 ): QueryExecutor {
   function getPrepared(query: Sql) {
-    // pg needs a single string with $1, $2 placeholders
     const text = query.compile((i) => "$" + (i + 1));
-    // pg driver can't bind native objects/arrays for JSONB; stringify them explicitly
-    const values = query.params.map((v) =>
-      v !== null && typeof v === "object" && !(v instanceof Date) && !(v instanceof Uint8Array)
-        ? JSON.stringify(v)
-        : v,
-    );
-
+    const values = query.params.map(stringifyJsonParam);
     const name = `q_${createHash("sha1").update(text).digest("hex").slice(0, 16)}`;
     return { name, text, values };
   }
