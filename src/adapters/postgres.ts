@@ -72,17 +72,6 @@ function mapFromRecord<T extends Record<string, unknown>>(
   return record as T;
 }
 
-function mapToRecord(_model: Model, data: Record<string, unknown>): Record<string, unknown> {
-  const res: Record<string, unknown> = {};
-  const keys = Object.keys(data);
-  for (let i = 0; i < keys.length; i++) {
-    const k = keys[i]!;
-    const val = data[k];
-    if (val === undefined) continue;
-    res[k] = val;
-  }
-  return res;
-}
 
 function sqlType(field: Field): string {
   switch (field.type) {
@@ -355,11 +344,14 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
   >(args: { model: K; data: T; select?: Select<T> }): Promise<T> {
     const { model: modelName, data, select } = args;
     const model = this.schema[modelName]!;
-    const input = mapToRecord(model, data);
-    const fields = Object.keys(input);
+    const rawData = data as Record<string, unknown>;
+    const fields: string[] = [];
     const values: unknown[] = [];
-    for (let i = 0; i < fields.length; i++) {
-      values.push(input[fields[i]!]);
+    for (const k of Object.keys(rawData)) {
+      const val = rawData[k];
+      if (val === undefined) continue;
+      fields.push(k);
+      values.push(val);
     }
     const query = insertSql({ table: modelName, fields, values, returning: select });
 
@@ -427,15 +419,14 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const { model: modelName, data } = args;
     const model = this.schema[modelName]!;
     assertNoPrimaryKeyUpdates(model, data);
-    const input = mapToRecord(model, data);
-    const fields = Object.keys(input);
+    const dataRecord = data as Record<string, unknown>;
 
-    if (fields.length === 0)
+    if (!Object.keys(dataRecord).some((k) => dataRecord[k] !== undefined))
       return this.find({ model: modelName, where: args.where, select: undefined });
 
     const query = updateSql({
       table: modelName,
-      set: set(input),
+      set: set(dataRecord),
       where: sql`ctid = (SELECT ctid FROM ${id(modelName)} WHERE ${where(args.where, { model, columnExpr: toColumnExpr })} LIMIT 1)`,
       returning: true,
     });
@@ -456,13 +447,12 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const { model: modelName, data } = args;
     const model = this.schema[modelName]!;
     assertNoPrimaryKeyUpdates(model, data);
-    const input = mapToRecord(model, data);
-    const fields = Object.keys(input);
-    if (fields.length === 0) return 0;
+    const dataRecord = data as Record<string, unknown>;
+    if (!Object.keys(dataRecord).some((k) => dataRecord[k] !== undefined)) return 0;
 
     const query = updateSql({
       table: modelName,
-      set: set(input),
+      set: set(dataRecord),
       where: where(args.where, { model, columnExpr: toColumnExpr }),
     });
 
@@ -491,31 +481,33 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const model = this.schema[modelName]!;
     assertNoPrimaryKeyUpdates(model, updateData);
 
-    const insertRow = mapToRecord(model, createData);
-    const createFields = Object.keys(insertRow);
-    const updateRow = mapToRecord(model, updateData);
-    const updateFields = Object.keys(updateRow);
+    const rawCreate = createData as Record<string, unknown>;
+    const createFields: string[] = [];
+    const createValues: unknown[] = [];
+    for (const k of Object.keys(rawCreate)) {
+      const val = rawCreate[k];
+      if (val === undefined) continue;
+      createFields.push(k);
+      createValues.push(val);
+    }
+
+    const rawUpdate = updateData as Record<string, unknown>;
+    const hasUpdateFields = Object.keys(rawUpdate).some((k) => rawUpdate[k] !== undefined);
     const primaryKeyFieldNames = getPrimaryKeyFieldNames(model);
 
-    const onConflict =
-      updateFields.length === 0
-        ? sql`DO NOTHING`
-        : args.where
-          ? sql`DO UPDATE SET ${set(updateRow)} WHERE ${where(args.where, {
-              model,
-              columnExpr: toColumnExpr,
-            })}`
-          : sql`DO UPDATE SET ${set(updateRow)}`;
-
-    const values: unknown[] = [];
-    for (let i = 0; i < createFields.length; i++) {
-      values.push(insertRow[createFields[i]!]);
-    }
+    const onConflict = hasUpdateFields
+      ? args.where
+        ? sql`DO UPDATE SET ${set(rawUpdate)} WHERE ${where(args.where, {
+            model,
+            columnExpr: toColumnExpr,
+          })}`
+        : sql`DO UPDATE SET ${set(rawUpdate)}`
+      : sql`DO NOTHING`;
 
     const query = upsertSql({
       table: modelName,
       fields: createFields,
-      values,
+      values: createValues,
       conflictColumns: primaryKeyFieldNames,
       onConflict,
       returning: select,

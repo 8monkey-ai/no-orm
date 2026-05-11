@@ -252,15 +252,23 @@ export function where<T>(
 
 /**
  * Prepares a SET clause for UPDATE or UPSERT.
+ * Skips undefined values; applies mapValue to each value when provided.
  */
-export function set(data: Record<string, unknown>, quoteChar = '"'): Sql {
+export function set(
+  data: Record<string, unknown>,
+  mapValue?: (val: unknown) => unknown,
+  quoteChar = '"',
+): Sql {
   const fields = Object.keys(data);
-  if (fields.length === 0) throw new Error("set() called with empty data");
   const parts: Sql[] = [];
   for (let i = 0; i < fields.length; i++) {
     const f = fields[i]!;
-    parts.push(sql`${id(f, quoteChar)} = ${data[f]}`);
+    const val = data[f];
+    if (val === undefined) continue;
+    const mapped = mapValue ? mapValue(val) : val;
+    parts.push(sql`${id(f, quoteChar)} = ${mapped}`);
   }
+  if (parts.length === 0) throw new Error("set() called with empty data");
   return join(parts, ", ");
 }
 
