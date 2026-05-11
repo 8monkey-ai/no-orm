@@ -27,6 +27,7 @@ import {
   Sql,
   sql,
   id,
+  extractFields,
   where,
   set,
   sort,
@@ -93,7 +94,7 @@ function sqlType(field: Field): string {
       return "INTEGER";
     case "json":
     case "json[]":
-      return "TEXT"; // SQLite stores JSON as plain text
+      return "TEXT";
     default:
       return "TEXT";
   }
@@ -282,15 +283,7 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
   >(args: { model: K; data: T; select?: Select<T> }): Promise<T> {
     const { model: modelName, data, select } = args;
     const model = this.schema[modelName]!;
-    const rawData = data as Record<string, unknown>;
-    const fields: string[] = [];
-    const values: unknown[] = [];
-    for (const k of Object.keys(rawData)) {
-      const val = rawData[k];
-      if (val === undefined) continue;
-      fields.push(k);
-      values.push(mapSqliteValue(val));
-    }
+    const { fields, values } = extractFields(data as Record<string, unknown>, mapSqliteValue);
     const query = insertSql({ table: modelName, fields, values, returning: select });
 
     const row = await this.executor.get(query);
@@ -437,15 +430,10 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     const model = this.schema[modelName]!;
     assertNoPrimaryKeyUpdates(model, updateData);
 
-    const rawCreate = createData as Record<string, unknown>;
-    const createFields: string[] = [];
-    const createValues: unknown[] = [];
-    for (const k of Object.keys(rawCreate)) {
-      const val = rawCreate[k];
-      if (val === undefined) continue;
-      createFields.push(k);
-      createValues.push(mapSqliteValue(val));
-    }
+    const { fields: createFields, values: createValues } = extractFields(
+      createData as Record<string, unknown>,
+      mapSqliteValue,
+    );
 
     const rawUpdate = updateData as Record<string, unknown>;
     const hasUpdateFields = Object.keys(rawUpdate).some((k) => rawUpdate[k] !== undefined);

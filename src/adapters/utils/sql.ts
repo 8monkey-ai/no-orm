@@ -307,7 +307,22 @@ export function stringifyJsonParam(v: unknown): unknown {
     : v;
 }
 
-/** Statement builders for SELECT, INSERT, UPDATE, DELETE, UPSERT, and COUNT */
+export function extractFields(
+  data: Record<string, unknown>,
+  mapValue?: (val: unknown) => unknown,
+): { fields: string[]; values: unknown[] } {
+  const keys = Object.keys(data);
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i]!;
+    const val = data[k];
+    if (val === undefined) continue;
+    fields.push(k);
+    values.push(mapValue === undefined ? val : mapValue(val));
+  }
+  return { fields, values };
+}
 
 export function selectSql(opts: {
   table: string;

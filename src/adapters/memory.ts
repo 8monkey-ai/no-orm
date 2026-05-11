@@ -80,13 +80,10 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     const record: RowData = Object.assign({}, data);
     const heap = this.tables.get(model)!;
 
-    // Add to storage
     const index = heap.length;
     heap.push(record);
     pkIndex.set(pkValue, record);
     this.indexMap.set(record, index);
-
-    // Add to global LRU for eviction tracking
     this.globalLRU.set(record, model);
 
     return Promise.resolve(this.mapFromRecord(record, select));
@@ -182,7 +179,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
       const value = heap[i]!;
       if (this.matchesWhere(where, value)) {
         const updated: RowData = Object.assign(value, data);
-        this.globalLRU.set(updated, model); // Update in LRU
+        this.globalLRU.get(updated); // Touch for LRU
         return Promise.resolve(this.mapFromRecord<T>(updated));
       }
     }
@@ -205,7 +202,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
       const value = heap[i]!;
       if (this.matchesWhere(where, value)) {
         Object.assign(value, data);
-        this.globalLRU.set(value, model); // Update in LRU
+        this.globalLRU.get(value); // Touch for LRU
         count++;
       }
     }
@@ -234,7 +231,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     if (existing !== undefined) {
       if (this.matchesWhere(where, existing)) {
         const updated: RowData = Object.assign(existing, update);
-        this.globalLRU.set(updated, model);
+        this.globalLRU.get(updated); // Touch for LRU
         return Promise.resolve(this.mapFromRecord(updated, select));
       }
       this.globalLRU.get(existing);
@@ -313,12 +310,13 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     if (idx === undefined) return;
 
     // Swap-and-pop
-    const lastRow = heap.at(-1)!;
-    heap[idx] = lastRow;
-    this.indexMap.set(lastRow, idx);
+    if (idx !== heap.length - 1) {
+      const lastRow = heap.at(-1)!;
+      heap[idx] = lastRow;
+      this.indexMap.set(lastRow, idx);
+    }
     heap.pop();
 
-    // Cleanup indexes
     this.indexMap.delete(row);
     const pkValue = this.getPrimaryKeyHash(model, row);
     pkIndex.delete(pkValue);
@@ -353,7 +351,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
       or: (children) => children.some(Boolean),
       leaf: (c) => {
         const recordVal = getNestedValue(record, c.field, c.path);
-        const op: string = c.op;
+        const opStr: string = c.op;
         switch (c.op) {
           case "eq":
             return recordVal === c.value;
@@ -372,7 +370,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
           case "not_in":
             return !c.value.includes(recordVal);
           default:
-            throw new Error(`Unsupported operator: ${op}`);
+            throw new Error(`Unsupported operator: ${opStr}`);
         }
       },
     });
