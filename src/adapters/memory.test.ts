@@ -63,12 +63,19 @@ describe("MemoryAdapter", () => {
       data: { id: "u1", name: "Alice", age: 25, is_active: true, metadata: null },
     });
 
-    await expect(
-      adapter.create({
+    try {
+      await adapter.create({
         model: "users",
         data: { id: "u1", name: "Bob", age: 30, is_active: true, metadata: null },
-      }),
-    ).rejects.toThrow("already exists");
+      });
+      expect.unreachable("create should reject duplicate primary keys");
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      if (!(error instanceof Error)) {
+        throw error;
+      }
+      expect(error.message).toContain("already exists");
+    }
   });
 
   it("should return null for find with no match", async () => {
@@ -282,13 +289,20 @@ describe("MemoryAdapter", () => {
       data: { id: "u1", name: "Alice", age: 25, is_active: true, metadata: null },
     });
 
-    expect(() =>
-      adapter.update({
+    try {
+      await adapter.update({
         model: "users",
         where: { field: "id", op: "eq", value: "u1" },
         data: { id: "u2" },
-      }),
-    ).toThrow("Primary key updates are not supported.");
+      });
+      expect.unreachable("update should reject primary key changes");
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      if (!(error instanceof Error)) {
+        throw error;
+      }
+      expect(error.message).toBe("Primary key updates are not supported.");
+    }
   });
 
   it("should return null when updating non-existent record", async () => {
@@ -564,20 +578,27 @@ describe("MemoryAdapter", () => {
       expect(found?.["age"]).toBe(30);
     });
 
-    it("should throw error if primary key is missing in 'create' data", () => {
+    it("should throw error if primary key is missing in 'create' data", async () => {
       // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- deliberate invalid data for error case
       const invalidData = {
         name: "Missing ID",
         age: 20,
       } as unknown as User;
 
-      expect(() =>
-        adapter.upsert({
+      try {
+        await adapter.upsert({
           model: "users",
           create: invalidData,
           update: { age: 21 },
-        }),
-      ).toThrow("Missing primary key field: id");
+        });
+        expect.unreachable("upsert should reject missing primary key data");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Error);
+        if (!(error instanceof Error)) {
+          throw error;
+        }
+        expect(error.message).toBe("Missing primary key field: id");
+      }
     });
   });
 

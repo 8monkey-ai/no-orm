@@ -69,13 +69,20 @@ describe("SqliteAdapter", () => {
         data: { id: "u1", name: "Alice", age: 30, is_active: true, metadata: null, tags: null },
       });
 
-      await expect(
-        adapter.update<"users", User>({
+      try {
+        await adapter.update<"users", User>({
           model: "users",
           where: { field: "id", op: "eq", value: "u1" },
           data: { id: "u2" },
-        }),
-      ).rejects.toThrow("Primary key updates are not supported.");
+        });
+        expect.unreachable("update should reject primary key changes");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Error);
+        if (!(error instanceof Error)) {
+          throw error;
+        }
+        expect(error.message).toBe("Primary key updates are not supported.");
+      }
     });
 
     it("should surface unknown write fields as database errors", async () => {

@@ -105,7 +105,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
       where.field === primaryKeyFieldNames[0] &&
       where.op === "eq"
     ) {
-      const pkValue = String(where.value);
+      const pkValue = JSON.stringify([where.value ?? null]);
       const row = this.pkIndexes.get(model)!.get(pkValue);
       if (row && this.matchesWhere(where, row)) {
         this.globalLRU.get(row); // Touch for LRU

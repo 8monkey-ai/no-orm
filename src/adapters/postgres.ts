@@ -27,8 +27,8 @@ import {
   isQueryExecutor,
   Sql,
   sql,
-  raw,
   id,
+  join,
   extractFields,
   where,
   set,
@@ -98,15 +98,14 @@ function toColumnExpr(model: Model, fieldName: string, path?: string[], value?: 
     throw new Error(`Cannot use JSON path on non-JSON field: ${fieldName}`);
   }
 
-  const isNumeric = typeof value === "number";
-  const isBoolean = typeof value === "boolean";
+  const hint: unknown = Array.isArray(value) ? value[0] : value;
+  const isNumeric = typeof hint === "number";
+  const isBoolean = typeof hint === "boolean";
 
-  let pathLiterals = "";
-  for (let i = 0; i < path.length; i++) {
-    pathLiterals += `, '${path[i]!.replaceAll("'", "''")}'`;
-  }
+  const pathArgs: Sql[] = [id(fieldName)];
+  for (let i = 0; i < path.length; i++) pathArgs.push(sql`${path[i]!}`);
 
-  let res = sql`jsonb_extract_path_text(${id(fieldName)}${raw(pathLiterals)})`;
+  let res = sql`jsonb_extract_path_text(${join(pathArgs, ", ")})`;
   if (isNumeric) {
     res = sql`(${res})::double precision`;
   } else if (isBoolean) {
