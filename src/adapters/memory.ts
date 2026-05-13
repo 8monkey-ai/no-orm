@@ -68,6 +68,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     select?: Select<T>;
   }): Promise<T> {
     const { model, data, select } = args;
+    this.assertNoUnknownFields(model, data);
     const pkIndex = this.pkIndexes.get(model)!;
     const pkValue = this.getPrimaryKeyHash(model, data);
 
@@ -173,6 +174,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
   }): Promise<T | null> {
     const { model, where, data } = args;
     assertNoPrimaryKeyUpdates(this.schema[model]!, data);
+    this.assertNoUnknownFields(model, data as Record<string, unknown>);
     const heap = this.tables.get(model)!;
 
     for (let i = 0; i < heap.length; i++) {
@@ -195,6 +197,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
   >(args: { model: K; where?: Where<T>; data: Partial<T> }): Promise<number> {
     const { model, where, data } = args;
     assertNoPrimaryKeyUpdates(this.schema[model]!, data);
+    this.assertNoUnknownFields(model, data as Record<string, unknown>);
     const heap = this.tables.get(model)!;
 
     let count = 0;
@@ -225,6 +228,8 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
   }): Promise<T> {
     const { model, create, update, where, select } = args;
     assertNoPrimaryKeyUpdates(this.schema[model]!, update as Record<string, unknown>);
+    this.assertNoUnknownFields(model, create);
+    this.assertNoUnknownFields(model, update as Record<string, unknown>);
     const pkValue = this.getPrimaryKeyHash(model, create);
     const existing = this.pkIndexes.get(model)!.get(pkValue);
 
@@ -300,6 +305,15 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
   }
 
   // --- Private helpers ---
+
+  private assertNoUnknownFields(model: keyof S & string, data: Record<string, unknown>): void {
+    const knownFields = this.schema[model]!.fields;
+    for (const key of Object.keys(data)) {
+      if (!(key in knownFields)) {
+        throw new Error(`Unknown field "${key}" in model "${model}"`);
+      }
+    }
+  }
 
   private removeFromTable(row: RowData, model: keyof S & string) {
     const heap = this.tables.get(model);

@@ -175,7 +175,7 @@ export function getPaginationFilter<T = Record<string, unknown>>(
 /**
  * Normalizes pagination criteria from a cursor and optional sort parameters.
  */
-function getPaginationCriteria<T = Record<string, unknown>>(
+export function getPaginationCriteria<T = Record<string, unknown>>(
   cursor: Cursor<T>,
   sortBy?: SortBy<T>[],
 ): { field: string; direction: "asc" | "desc"; path?: string[] }[] {
