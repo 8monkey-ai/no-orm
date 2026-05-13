@@ -196,3 +196,9 @@ export function getPaginationCriteria<T = Record<string, unknown>>(
   }
   return criteria;
 }
+
+export function fnv1aHash(s: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ (s.codePointAt(i) ?? 0), 16777619);
+  return Math.abs(h).toString(16).padStart(8, "0");
+}

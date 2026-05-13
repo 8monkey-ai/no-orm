@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import type { SQL as BunSQL } from "bun";
 import type { Client as PgClient, Pool as PgPool, PoolClient as PgPoolClient } from "pg";
 import type postgres from "postgres";
@@ -18,6 +16,7 @@ import type {
 import {
   assertNoPrimaryKeyUpdates,
   buildPrimaryKeyFilter,
+  fnv1aHash,
   getPrimaryKeyFieldNames,
   getPrimaryKeyValues,
   mapNumeric,
@@ -213,7 +212,7 @@ function createPgExecutor(
   function getPrepared(query: Sql) {
     const text = query.compile((i) => "$" + (i + 1));
     const values = query.params.map(stringifyJsonParam);
-    const name = `q_${createHash("sha1").update(text).digest("hex").slice(0, 16)}`;
+    const name = `q_${fnv1aHash(text)}`;
     return { name, text, values };
   }
 

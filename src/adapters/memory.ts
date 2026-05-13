@@ -164,6 +164,16 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     return Promise.resolve(final);
   }
 
+  private definedPatch(data: Record<string, unknown>): RowData {
+    const patch: RowData = {};
+    const keys = Object.keys(data);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i]!;
+      if (data[key] !== undefined) patch[key] = data[key];
+    }
+    return patch;
+  }
+
   /**
    * Updates the first record matching the criteria. Primary key updates are rejected.
    */
@@ -173,14 +183,15 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     data: Partial<T>;
   }): Promise<T | null> {
     const { model, where, data } = args;
-    assertNoPrimaryKeyUpdates(this.schema[model]!, data);
-    this.assertNoUnknownFields(model, data as Record<string, unknown>);
+    const patch = this.definedPatch(data as Record<string, unknown>);
+    assertNoPrimaryKeyUpdates(this.schema[model]!, patch);
+    this.assertNoUnknownFields(model, patch);
     const heap = this.tables.get(model)!;
 
     for (let i = 0; i < heap.length; i++) {
       const value = heap[i]!;
       if (this.matchesWhere(where, value)) {
-        const updated: RowData = Object.assign(value, data);
+        const updated: RowData = Object.assign(value, patch);
         this.globalLRU.get(updated); // Touch for LRU
         return Promise.resolve(this.mapFromRecord<T>(updated));
       }
@@ -196,16 +207,17 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     T extends Record<string, unknown> = InferModel<S[K]>,
   >(args: { model: K; where?: Where<T>; data: Partial<T> }): Promise<number> {
     const { model, where, data } = args;
-    assertNoPrimaryKeyUpdates(this.schema[model]!, data);
-    this.assertNoUnknownFields(model, data as Record<string, unknown>);
-    if (Object.keys(data).length === 0) return Promise.resolve(0);
+    const patch = this.definedPatch(data as Record<string, unknown>);
+    assertNoPrimaryKeyUpdates(this.schema[model]!, patch);
+    this.assertNoUnknownFields(model, patch);
+    if (Object.keys(patch).length === 0) return Promise.resolve(0);
     const heap = this.tables.get(model)!;
 
     let count = 0;
     for (let i = 0; i < heap.length; i++) {
       const value = heap[i]!;
       if (this.matchesWhere(where, value)) {
-        Object.assign(value, data);
+        Object.assign(value, patch);
         this.globalLRU.get(value); // Touch for LRU
         count++;
       }
@@ -228,15 +240,16 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     select?: Select<T>;
   }): Promise<T> {
     const { model, create, update, where, select } = args;
-    assertNoPrimaryKeyUpdates(this.schema[model]!, update as Record<string, unknown>);
+    const patch = this.definedPatch(update as Record<string, unknown>);
+    assertNoPrimaryKeyUpdates(this.schema[model]!, patch);
     this.assertNoUnknownFields(model, create);
-    this.assertNoUnknownFields(model, update as Record<string, unknown>);
+    this.assertNoUnknownFields(model, patch);
     const pkValue = this.getPrimaryKeyHash(model, create);
     const existing = this.pkIndexes.get(model)!.get(pkValue);
 
     if (existing !== undefined) {
       if (this.matchesWhere(where, existing)) {
-        const updated: RowData = Object.assign(existing, update);
+        const updated: RowData = Object.assign(existing, patch);
         this.globalLRU.get(updated); // Touch for LRU
         return Promise.resolve(this.mapFromRecord(updated, select));
       }
