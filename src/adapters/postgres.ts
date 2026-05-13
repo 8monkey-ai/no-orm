@@ -101,11 +101,9 @@ function toColumnExpr(model: Model, fieldName: string, path?: string[], value?: 
   const isNumeric = typeof value === "number";
   const isBoolean = typeof value === "boolean";
 
-  // Path elements are developer-controlled identifiers; inline as SQL literals to avoid
-  // VARIADIC parameterization issues with postgres.js and Bun SQL drivers.
   let pathLiterals = "";
   for (let i = 0; i < path.length; i++) {
-    pathLiterals += `, '${path[i]!}'`;
+    pathLiterals += `, '${path[i]!.replaceAll("'", "''")}'`;
   }
 
   let res = sql`jsonb_extract_path_text(${id(fieldName)}${raw(pathLiterals)})`;

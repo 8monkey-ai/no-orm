@@ -99,7 +99,7 @@ export function assertNoPrimaryKeyUpdates(model: Model, data: Record<string, unk
   const primaryKeyFieldNames = getPrimaryKeyFieldNames(model);
   for (let i = 0; i < primaryKeyFieldNames.length; i++) {
     const field = primaryKeyFieldNames[i]!;
-    if (data[field] !== undefined) {
+    if (Object.prototype.hasOwnProperty.call(data, field)) {
       throw new Error("Primary key updates are not supported.");
     }
   }
@@ -175,7 +175,7 @@ export function getPaginationFilter<T = Record<string, unknown>>(
 /**
  * Normalizes pagination criteria from a cursor and optional sort parameters.
  */
-export function getPaginationCriteria<T = Record<string, unknown>>(
+function getPaginationCriteria<T = Record<string, unknown>>(
   cursor: Cursor<T>,
   sortBy?: SortBy<T>[],
 ): { field: string; direction: "asc" | "desc"; path?: string[] }[] {

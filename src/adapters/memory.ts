@@ -326,19 +326,11 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     const modelSpec = this.schema[modelName as keyof S & string]!;
     const primaryKeyValues = getPrimaryKeyValues(modelSpec, data);
     const primaryKeyFieldNames = getPrimaryKeyFieldNames(modelSpec);
-    let res = "";
+    const tuple: unknown[] = [];
     for (let i = 0; i < primaryKeyFieldNames.length; i++) {
-      if (i > 0) res += "|";
-      const val = primaryKeyValues[primaryKeyFieldNames[i]!];
-      if (val !== null && val !== undefined) {
-        if (typeof val === "object") {
-          res += JSON.stringify(val);
-        } else if (typeof val === "string" || typeof val === "number" || typeof val === "boolean") {
-          res += String(val);
-        }
-      }
+      tuple.push(primaryKeyValues[primaryKeyFieldNames[i]!] ?? null);
     }
-    return res;
+    return JSON.stringify(tuple);
   }
 
   private matchesWhere<T extends Record<string, unknown>>(

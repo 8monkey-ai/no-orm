@@ -221,11 +221,10 @@ function createSqliteExecutor(driver: SqliteDatabase, inTransaction = false): Qu
     all: (query: Sql) => driver.all(query.compile("?"), query.params),
     get: (query: Sql) => driver.get(query.compile("?"), query.params),
     run: async (query: Sql) => {
-      if (query.params.length === 0) {
-        await driver.exec(query.compile("?"));
-        return { changes: 0 };
-      }
-      const res = await driver.run(query.compile("?"), query.params);
+      const res =
+        query.params.length === 0
+          ? await driver.run(query.compile("?"))
+          : await driver.run(query.compile("?"), query.params);
       return { changes: res.changes ?? 0 };
     },
     transaction: async (fn) => {

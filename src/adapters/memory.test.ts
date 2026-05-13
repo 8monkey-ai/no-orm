@@ -63,12 +63,12 @@ describe("MemoryAdapter", () => {
       data: { id: "u1", name: "Alice", age: 25, is_active: true, metadata: null },
     });
 
-    expect(() =>
+    await expect(
       adapter.create({
         model: "users",
         data: { id: "u1", name: "Bob", age: 30, is_active: true, metadata: null },
       }),
-    ).toThrow("already exists");
+    ).rejects.toThrow("already exists");
   });
 
   it("should return null for find with no match", async () => {
