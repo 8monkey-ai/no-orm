@@ -373,7 +373,11 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     if (!Object.keys(dataRecord).some((k) => dataRecord[k] !== undefined))
       return this.find({ model: modelName, where: args.where, select: undefined });
 
-    const innerWhere = where(args.where, { model, columnExpr: toColumnExpr, mapValue: mapSqliteValue });
+    const innerWhere = where(args.where, {
+      model,
+      columnExpr: toColumnExpr,
+      mapValue: mapSqliteValue,
+    });
     const query = updateSql({
       table: modelName,
       set: set(dataRecord, (v) => mapSqliteValue(v)),
@@ -447,7 +451,11 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
       onConflict = { text: "DO NOTHING", params: [] };
     } else if (args.where) {
       const updateSet = set(rawUpdate, (v) => mapSqliteValue(v));
-      const updateWhere = where(args.where, { model, columnExpr: toColumnExpr, mapValue: mapSqliteValue });
+      const updateWhere = where(args.where, {
+        model,
+        columnExpr: toColumnExpr,
+        mapValue: mapSqliteValue,
+      });
       const params = updateSet.params.slice();
       for (let i = 0; i < updateWhere.params.length; i++) params.push(updateWhere.params[i]);
       onConflict = { text: `DO UPDATE SET ${updateSet.text} WHERE ${updateWhere.text}`, params };

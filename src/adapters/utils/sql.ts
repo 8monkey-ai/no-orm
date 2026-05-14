@@ -299,7 +299,7 @@ export function updateSql(opts: {
   where: Fragment;
   returning?: boolean;
 }): Fragment {
-  const text = `UPDATE ${id(opts.table).text} SET ${opts.set.text} WHERE ${opts.where.text}${opts.returning ? " RETURNING *" : ""}`;
+  const text = `UPDATE ${id(opts.table).text} SET ${opts.set.text} WHERE ${opts.where.text}${opts.returning === true ? " RETURNING *" : ""}`;
   const params = opts.set.params.slice();
   for (let i = 0; i < opts.where.params.length; i++) params.push(opts.where.params[i]);
   return { text, params };

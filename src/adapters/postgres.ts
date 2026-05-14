@@ -141,9 +141,10 @@ type BunSqlResult = Record<string, unknown>[] & {
 // --- Executor factories ---
 
 function toTaggedArgs(query: Fragment): [TemplateStringsArray, ...unknown[]] {
-  const parts = query.text.split("?") as string[] & { raw: readonly string[] };
-  parts.raw = parts.slice();
-  return [parts as TemplateStringsArray, ...query.params];
+  const split = query.text.split("?");
+  const parts = Object.assign(split, { raw: split.slice() as readonly string[] });
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- constructing TemplateStringsArray manually from split; shape is structurally identical
+  return [parts as unknown as TemplateStringsArray, ...query.params];
 }
 
 function createPostgresJsExecutor(
@@ -213,7 +214,7 @@ function createPgExecutor(
 ): QueryExecutor {
   function getPrepared(query: Fragment) {
     const { text, values: rawValues } = toNumberedParams(query);
-    const values = rawValues.map(stringifyJsonParam);
+    const values = rawValues.map((v) => stringifyJsonParam(v));
     const name = `q_${fnv1aHash(text)}`;
     return { name, text, values };
   }
@@ -445,8 +446,14 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const hasUpdateFields = Object.keys(rawUpdate).some((k) => rawUpdate[k] !== undefined);
     const primaryKeyFieldNames = getPrimaryKeyFieldNames(model);
 
-    const qualifiedColumnExpr = (m: Model, fieldName: string, path?: string[], value?: unknown): Fragment => {
-      if (!path || path.length === 0) return { text: `${id(modelName).text}.${id(fieldName).text}`, params: [] };
+    const qualifiedColumnExpr = (
+      m: Model,
+      fieldName: string,
+      path?: string[],
+      value?: unknown,
+    ): Fragment => {
+      if (!path || path.length === 0)
+        return { text: `${id(modelName).text}.${id(fieldName).text}`, params: [] };
       return toColumnExpr(m, fieldName, path, value);
     };
 
