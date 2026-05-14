@@ -437,6 +437,32 @@ describe("MemoryAdapter", () => {
     expect(found?.["name"]).toBe("Alice");
   });
 
+  it("should roll back writes when a transaction throws", async () => {
+    await adapter.create({
+      model: "users",
+      data: { id: "u1", name: "Alice", age: 25, is_active: true, metadata: null },
+    });
+
+    await expect(
+      adapter.transaction(async (tx) => {
+        await tx.create({
+          model: "users",
+          data: { id: "u2", name: "Bob", age: 30, is_active: true, metadata: null },
+        });
+        await tx.update({
+          model: "users",
+          where: { field: "id", op: "eq", value: "u1" },
+          data: { name: "AliceModified" },
+        });
+        throw new Error("intentional rollback");
+      }),
+    ).rejects.toThrow("intentional rollback");
+
+    const users = await adapter.findMany({ model: "users" });
+    expect(users).toHaveLength(1);
+    expect(users[0]?.["name"]).toBe("Alice");
+  });
+
   // --- Logical operators ---
 
   it("should support complex logical operators", async () => {
