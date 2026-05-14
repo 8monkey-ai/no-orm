@@ -1,89 +1,238 @@
-# no-orm
+# @8monkey/no-orm
 
-A tiny, database-independent persistence core for TypeScript libraries. No heavy abstractions, just the primitives.
+A tiny, schema-first persistence core for TypeScript libraries.
 
-## Features
+`no-orm` is intentionally small:
 
-- **Canonical Schema**: One portable schema representation for any database.
-- **Type Inference**: Derive TypeScript types directly from your schema.
-- **Adapter-Based**: Small, generic execution contract for multiple backends.
+- one canonical schema shape
+- inferred TypeScript model types
+- adapter-based persistence
+- minimal CRUD, filtering, ordering, pagination, and transactions
+
+It is not a query builder, migration framework, or full ORM runtime.
 
 ## Installation
 
 ```bash
+npm install @8monkey/no-orm
+# or
 bun add @8monkey/no-orm
 ```
 
-## Usage
+## Define a Schema
 
-### 1. Define your Schema
-
-```typescript
-import { Schema } from "@8monkey/no-orm";
+```ts
+import type { InferModel, Schema } from "@8monkey/no-orm";
 
 export const schema = {
-  conversations: {
+  users: {
     fields: {
-      id: { type: { type: "string", max: 255 } },
-      created_at: { type: { type: "timestamp" } },
-      metadata: { type: { type: "json" }, nullable: true },
+      id: { type: "string" },
+      name: { type: "string", max: 255 },
+      age: { type: "number" },
+      is_active: { type: "boolean" },
+      metadata: { type: "json", nullable: true },
+      tags: { type: "json[]", nullable: true },
+      created_at: { type: "timestamp" },
     },
-    primaryKey: {
-      fields: ["id"],
-    },
-    indexes: [
-      {
-        fields: [
-          { field: "created_at", order: "desc" },
-          { field: "id", order: "desc" },
-        ],
-      },
-    ],
+    primaryKey: "id",
+    indexes: [{ field: "created_at", order: "desc" }],
   },
 } as const satisfies Schema;
+
+type User = InferModel<typeof schema.users>;
 ```
 
-### 2. Infer Types
+## Choose an Adapter
 
-```typescript
-import { InferModel } from "@8monkey/no-orm";
+### SQLite
 
-export type Conversation = InferModel<typeof schema.conversations>;
-// Result: { id: string; created_at: number; metadata: Record<string, unknown> | null; }
+```ts
+import { Database } from "bun:sqlite";
+import { SqliteAdapter } from "@8monkey/no-orm/adapters/sqlite";
+
+const db = new Database("data.db"); // or ":memory:" for an in-process database
+const adapter = new SqliteAdapter(schema, db);
+
+await adapter.migrate();
 ```
 
-### 3. Use an Adapter
+### Postgres
 
-```typescript
-import { Adapter } from "@8monkey/no-orm";
-// Import a concrete adapter (e.g., @8monkey/no-orm-sqlite)
+```ts
+import postgres from "postgres"; // or import { Pool } from "pg"
+import { PostgresAdapter } from "@8monkey/no-orm/adapters/postgres";
 
-const adapter: Adapter = new SqliteAdapter({ schema, db });
+const sql = postgres(process.env.POSTGRES_URL!);
+const adapter = new PostgresAdapter(schema, sql);
 
-// Minimal Schema Bootstrap
-await adapter.migrate({ schema });
+await adapter.migrate();
+```
 
-// Create a record
-const conv = await adapter.create({
-  model: "conversations",
+### Memory
+
+In-memory storage for testing or temporary data.
+
+```ts
+import { MemoryAdapter } from "@8monkey/no-orm/adapters/memory";
+
+const adapter = new MemoryAdapter(schema, { maxItems: 100 });
+await adapter.migrate();
+```
+
+## CRUD
+
+```ts
+// Create
+const created = await adapter.create({
+  model: "users",
   data: {
-    id: "conv_123",
-    created_at: Date.now(),
+    id: "u1",
+    name: "Alice",
+    age: 30,
+    is_active: true,
     metadata: { theme: "dark" },
+    tags: ["admin"],
+    created_at: Date.now(),
   },
 });
 
-// Find many with filters
-const results = await adapter.findMany({
-  model: "conversations",
-  where: {
-    field: "created_at",
-    op: "gt",
-    value: Date.now() - 86400000,
-  },
-  limit: 10,
+// Find one
+const found = await adapter.find({
+  model: "users",
+  where: { field: "id", op: "eq", value: "u1" },
+});
+
+// Find many
+const users = await adapter.findMany({
+  model: "users",
+  where: { field: "is_active", op: "eq", value: true },
+  sortBy: [{ field: "created_at", direction: "desc" }],
+  limit: 20,
+});
+
+// Update one
+const updated = await adapter.update({
+  model: "users",
+  where: { field: "id", op: "eq", value: "u1" },
+  data: { age: 31 },
+});
+
+// Update many
+const updatedCount = await adapter.updateMany({
+  model: "users",
+  where: { field: "is_active", op: "eq", value: true },
+  data: { age: 99 },
+});
+
+// Delete one
+await adapter.delete({
+  model: "users",
+  where: { field: "id", op: "eq", value: "u1" },
+});
+
+// Delete many
+const deletedCount = await adapter.deleteMany({
+  model: "users",
+  where: { field: "is_active", op: "eq", value: false },
+});
+
+// Count
+const total = await adapter.count({
+  model: "users",
+  where: { field: "is_active", op: "eq", value: true },
+});
+
+// Upsert - insert or update by primary key
+const user = await adapter.upsert({
+  model: "users",
+  create: { id: "u1", name: "Alice", age: 30, is_active: true, created_at: Date.now() },
+  update: { age: 31 },
+  // Optional: only update if predicate is met
+  where: { field: "is_active", op: "eq", value: true },
 });
 ```
+
+## Filtering
+
+All operations accept a `where` clause:
+
+```ts
+// Operators
+where: { field: "age", op: "eq", value: 30 }
+where: { field: "age", op: "ne", value: null }
+where: { field: "age", op: "gt", value: 18 }
+where: { field: "age", op: "gte", value: 18 }
+where: { field: "age", op: "lt", value: 65 }
+where: { field: "age", op: "lte", value: 65 }
+where: { field: "status", op: "in", value: ["active", "pending"] }
+where: { field: "status", op: "not_in", value: ["banned"] }
+
+// Combine with and/or
+where: {
+  and: [
+    { field: "age", op: "gte", value: 18 },
+    { field: "is_active", op: "eq", value: true },
+  ],
+}
+```
+
+## JSON Paths
+
+Filter nested JSON fields using `path`:
+
+```ts
+const darkUsers = await adapter.findMany({
+  model: "users",
+  where: {
+    field: "metadata",
+    path: ["preferences", "theme"],
+    op: "eq",
+    value: "dark",
+  },
+});
+```
+
+## Pagination
+
+```ts
+// Offset pagination
+const page = await adapter.findMany({
+  model: "users",
+  sortBy: [{ field: "created_at", direction: "desc" }],
+  limit: 20,
+  offset: 40,
+});
+
+// Cursor pagination (keyset)
+const cursorPage = await adapter.findMany({
+  model: "users",
+  sortBy: [{ field: "created_at", direction: "desc" }],
+  limit: 20,
+  cursor: {
+    after: { created_at: 1699900000000, id: "u20" },
+  },
+});
+```
+
+## Transactions
+
+```ts
+await adapter.transaction(async (tx) => {
+  await tx.create({
+    model: "users",
+    data: { id: "u2", name: "Bob", age: 28, is_active: true, created_at: Date.now() },
+  });
+
+  await tx.update({
+    model: "users",
+    where: { field: "id", op: "eq", value: "u2" },
+    data: { age: 29 },
+  });
+});
+```
+
+Nested calls to `transaction()` join the existing transaction.
 
 ## License
 
