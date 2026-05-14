@@ -52,10 +52,11 @@ const MAX_CACHED_STATEMENTS = 100;
 // --- Internal SQLite Syntax Helpers ---
 
 const mapSqliteValue = (val: unknown, field?: Field) => {
+  if (val === null || val === undefined) return val;
   if (field?.type === "boolean" || (field === undefined && typeof val === "boolean")) {
     return val === true ? 1 : 0;
   }
-  if (val !== null && typeof val === "object") {
+  if (typeof val === "object") {
     return JSON.stringify(val);
   }
   return val;

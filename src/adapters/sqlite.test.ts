@@ -11,6 +11,7 @@ const schema = {
       name: { type: "string" },
       age: { type: "number" },
       is_active: { type: "boolean" },
+      is_verified: { type: "boolean", nullable: true },
       metadata: { type: "json", nullable: true },
       tags: { type: "json[]", nullable: true },
     },
@@ -38,6 +39,7 @@ describe("SqliteAdapter", () => {
         name: "Alice",
         age: 30,
         is_active: true,
+        is_verified: null,
         metadata: { theme: "dark" },
         tags: ["admin"],
       };
@@ -533,6 +535,90 @@ describe("SqliteAdapter", () => {
         where: { field: "is_active", op: "in", value: [true] },
       });
       expect(users).toHaveLength(2);
+    });
+  });
+
+  describe("Nullable Boolean Fields", () => {
+    it("should preserve null for nullable boolean fields on create", async () => {
+      await adapter.create({
+        model: "users",
+        data: {
+          id: "nb1",
+          name: "NullableBoolTest",
+          age: 25,
+          is_active: true,
+          is_verified: null,
+          metadata: null,
+          tags: null,
+        },
+      });
+
+      const found = await adapter.find({
+        model: "users",
+        where: { field: "id", op: "eq", value: "nb1" },
+      });
+      expect(found?.["is_verified"]).toBeNull();
+    });
+
+    it("should preserve null for nullable boolean fields on update", async () => {
+      await adapter.create({
+        model: "users",
+        data: {
+          id: "nb2",
+          name: "UpdateNullBool",
+          age: 25,
+          is_active: true,
+          is_verified: true,
+          metadata: null,
+          tags: null,
+        },
+      });
+
+      await adapter.update({
+        model: "users",
+        where: { field: "id", op: "eq", value: "nb2" },
+        data: { is_verified: null },
+      });
+
+      const found = await adapter.find({
+        model: "users",
+        where: { field: "id", op: "eq", value: "nb2" },
+      });
+      expect(found?.["is_verified"]).toBeNull();
+    });
+
+    it("should filter by nullable boolean null equality (IS NULL)", async () => {
+      await adapter.create({
+        model: "users",
+        data: {
+          id: "nb3",
+          name: "NullBoolFilter",
+          age: 25,
+          is_active: true,
+          is_verified: null,
+          metadata: null,
+          tags: null,
+        },
+      });
+      await adapter.create({
+        model: "users",
+        data: {
+          id: "nb4",
+          name: "VerifiedUser",
+          age: 30,
+          is_active: true,
+          is_verified: true,
+          metadata: null,
+          tags: null,
+        },
+      });
+
+      const users = await adapter.findMany({
+        model: "users",
+        where: { field: "is_verified", op: "eq", value: null },
+      });
+      expect(users.find((u) => u["id"] === "nb3")).toBeDefined();
+      expect(users.find((u) => u["id"] === "nb4")).toBeUndefined();
     });
   });
 
