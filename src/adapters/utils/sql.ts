@@ -1,121 +1,70 @@
 import type { Cursor, Field, Model, Schema, SortBy, Where } from "../../types";
 import { getPaginationFilter, getPrimaryKeyFieldNames, walkWhere } from "./common";
 
-/**
- * A Sql instance keeps SQL logic and dynamic data separate to prevent injection.
- * It is structured to be compatible with TemplateStringsArray for safe driver calls.
- */
-export class Sql {
-  constructor(
-    readonly strings: string[],
-    readonly params: unknown[],
-  ) {}
-
-  /**
-   * Augments the strings array with a .raw property for drivers that expect TemplateStringsArray.
-   * This is required for safe driver calls that use tagged templates (e.g. postgres.js, Bun SQL).
-   */
-  toTaggedArgs(): [TemplateStringsArray, ...unknown[]] {
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- augmenting array to satisfy TemplateStringsArray contract
-    const strings = this.strings as string[] & { raw: readonly string[] };
-    strings.raw = this.strings;
-    return [strings as TemplateStringsArray, ...this.params];
-  }
-
-  /**
-   * Compiles the Sql instance into a single string with placeholders.
-   * Useful for drivers that expect a SQL string and a separate array of parameters.
-   */
-  compile(placeholder: string | ((index: number) => string)): string {
-    const paramsLength = this.params.length;
-    if (paramsLength === 0) return this.strings[0]!;
-
-    if (typeof placeholder === "string") {
-      return this.strings.join(placeholder);
-    }
-
-    let result = "";
-    for (let i = 0; i < paramsLength; i++) {
-      result += this.strings[i]! + placeholder(i);
-    }
-    result += this.strings[paramsLength]!;
-    return result;
-  }
-}
+export type Fragment = { text: string; params: unknown[] };
 
 /**
- * Raw text to be included directly in SQL without parameterization.
- * Returns a Sql instance with no parameters.
+ * Safely quotes a SQL identifier or comma-separated list of identifiers.
  */
-export const raw = (s: string) => new Sql([s], []);
-
-/**
- * Tagged template literal for building SQL fragments safely.
- * Nesting Sql instances is supported.
- */
-export function sql(strings: TemplateStringsArray, ...values: unknown[]): Sql {
-  const outStrings = [strings[0]!];
-  const outParams: unknown[] = [];
-
-  for (let i = 0; i < values.length; i++) {
-    const v = values[i];
-    const tail = strings[i + 1]!;
-
-    if (v instanceof Sql) {
-      outStrings[outStrings.length - 1] += v.strings[0]!;
-      for (let j = 1; j < v.strings.length; j++) {
-        outStrings.push(v.strings[j]!);
-      }
-      for (let j = 0; j < v.params.length; j++) {
-        outParams.push(v.params[j]);
-      }
-      outStrings[outStrings.length - 1] += tail;
-    } else {
-      outParams.push(v);
-      outStrings.push(tail);
-    }
-  }
-  return new Sql(outStrings, outParams);
-}
-
-/**
- * Safely quotes a SQL identifier or list of identifiers.
- * - id("users") -> "users"
- * - id(["id", "name"]) -> "id", "name"
- */
-export function id(val: string | readonly string[], quoteChar = '"'): Sql {
-  if (val === "" || (Array.isArray(val) && val.length === 0)) return raw("");
+export function id(val: string | readonly string[], quoteChar = '"'): Fragment {
+  if (val === "" || (Array.isArray(val) && val.length === 0)) return { text: "", params: [] };
 
   if (typeof val === "string") {
-    return raw(quoteChar + val + quoteChar);
+    return { text: quoteChar + val + quoteChar, params: [] };
   }
 
-  let res = "";
+  let text = "";
   for (let i = 0; i < val.length; i++) {
-    if (i > 0) res += ", ";
-    res += quoteChar + val[i]! + quoteChar;
+    if (i > 0) text += ", ";
+    text += quoteChar + val[i]! + quoteChar;
   }
-  return raw(res);
+  return { text, params: [] };
 }
 
 /**
- * Generates a comma-separated list of placeholders for values.
+ * Generates a comma-separated list of ? placeholders for values.
  */
-export function placeholders(values: unknown[]): Sql {
-  if (values.length === 0) return new Sql([""], []);
-  const strings: string[] = [""];
-  for (let i = 1; i < values.length; i++) {
-    strings.push(", ");
-  }
-  strings.push("");
-  return new Sql(strings, values);
+export function placeholders(values: unknown[]): Fragment {
+  if (values.length === 0) return { text: "", params: [] };
+  let text = "?";
+  for (let i = 1; i < values.length; i++) text += ", ?";
+  return { text, params: values };
 }
 
-/** Shared contracts for SQL executors */
+/**
+ * Concatenates multiple fragments with a separator, merging params in order.
+ */
+export function join(fragments: Fragment[], separator: string): Fragment {
+  if (fragments.length === 0) return { text: "", params: [] };
+
+  let text = fragments[0]!.text;
+  const params: unknown[] = fragments[0]!.params.slice();
+
+  for (let i = 1; i < fragments.length; i++) {
+    const f = fragments[i]!;
+    text += separator + f.text;
+    for (let j = 0; j < f.params.length; j++) params.push(f.params[j]);
+  }
+
+  return { text, params };
+}
+
+/**
+ * Converts ? placeholders to $1, $2, ... for pg-style drivers.
+ * Uses split instead of regex for performance.
+ */
+export function toNumberedParams(f: Fragment): { text: string; values: unknown[] } {
+  const parts = f.text.split("?");
+  if (parts.length === 1) return { text: f.text, values: f.params };
+  let text = parts[0]!;
+  for (let i = 1; i < parts.length; i++) text += "$" + i + parts[i]!;
+  return { text, values: f.params };
+}
+
 export interface QueryExecutor {
-  all(query: Sql): Promise<Record<string, unknown>[]>;
-  get(query: Sql): Promise<Record<string, unknown> | undefined | null>;
-  run(query: Sql): Promise<{ changes: number }>;
+  all(query: Fragment): Promise<Record<string, unknown>[]>;
+  get(query: Fragment): Promise<Record<string, unknown> | undefined | null>;
+  run(query: Fragment): Promise<{ changes: number }>;
   transaction<T>(fn: (executor: QueryExecutor) => Promise<T>): Promise<T>;
   readonly inTransaction: boolean;
 }
@@ -134,35 +83,12 @@ export function isQueryExecutor(obj: unknown): obj is QueryExecutor {
   );
 }
 
-/**
- * Concatenates multiple Sql fragments with a separator.
- */
-export function join(fragments: Sql[], separator: string): Sql {
-  if (fragments.length === 0) return new Sql([""], []);
-
-  const strings = fragments[0]!.strings.slice();
-  const params = fragments[0]!.params.slice();
-
-  for (let i = 1; i < fragments.length; i++) {
-    const f = fragments[i]!;
-    strings[strings.length - 1] += separator + f.strings[0];
-    for (let j = 1; j < f.strings.length; j++) {
-      strings.push(f.strings[j]!);
-    }
-    for (let j = 0; j < f.params.length; j++) {
-      params.push(f.params[j]);
-    }
-  }
-
-  return new Sql(strings, params);
-}
-
 export type ColumnExprFn = (
   model: Model,
   fieldName: string,
   path?: string[],
   value?: unknown,
-) => Sql;
+) => Fragment;
 export type MapValueFn = (val: unknown, field?: Field) => unknown;
 
 export interface WhereOptions {
@@ -171,19 +97,19 @@ export interface WhereOptions {
   mapValue?: MapValueFn;
 }
 
-function buildWhere<T>(clause: Where<T>, options: WhereOptions): Sql {
-  return walkWhere<Sql, T>(clause, {
+function buildWhere<T>(clause: Where<T>, options: WhereOptions): Fragment {
+  return walkWhere<Fragment, T>(clause, {
     and: (children) => {
-      const parts: Sql[] = [];
+      const parts: Fragment[] = [];
       for (let i = 0; i < children.length; i++) {
-        parts.push(sql`(${children[i]!})`);
+        parts.push({ text: `(${children[i]!.text})`, params: children[i]!.params });
       }
       return join(parts, " AND ");
     },
     or: (children) => {
-      const parts: Sql[] = [];
+      const parts: Fragment[] = [];
       for (let i = 0; i < children.length; i++) {
-        parts.push(sql`(${children[i]!})`);
+        parts.push({ text: `(${children[i]!.text})`, params: children[i]!.params });
       }
       return join(parts, " OR ");
     },
@@ -193,39 +119,61 @@ function buildWhere<T>(clause: Where<T>, options: WhereOptions): Sql {
       const mapped = options.mapValue ? options.mapValue(c.value, field) : c.value;
 
       switch (c.op) {
-        case "eq":
-          return c.value === null ? sql`${expr} IS NULL` : sql`${expr} = ${mapped}`;
-        case "ne":
-          return c.value === null ? sql`${expr} IS NOT NULL` : sql`${expr} != ${mapped}`;
-        case "gt":
-          return sql`${expr} > ${mapped}`;
-        case "gte":
-          return sql`${expr} >= ${mapped}`;
-        case "lt":
-          return sql`${expr} < ${mapped}`;
-        case "lte":
-          return sql`${expr} <= ${mapped}`;
+        case "eq": {
+          if (c.value === null) return { text: `${expr.text} IS NULL`, params: expr.params };
+          const params = expr.params.slice();
+          params.push(mapped);
+          return { text: `${expr.text} = ?`, params };
+        }
+        case "ne": {
+          if (c.value === null) return { text: `${expr.text} IS NOT NULL`, params: expr.params };
+          const params = expr.params.slice();
+          params.push(mapped);
+          return { text: `${expr.text} != ?`, params };
+        }
+        case "gt": {
+          const params = expr.params.slice();
+          params.push(mapped);
+          return { text: `${expr.text} > ?`, params };
+        }
+        case "gte": {
+          const params = expr.params.slice();
+          params.push(mapped);
+          return { text: `${expr.text} >= ?`, params };
+        }
+        case "lt": {
+          const params = expr.params.slice();
+          params.push(mapped);
+          return { text: `${expr.text} < ?`, params };
+        }
+        case "lte": {
+          const params = expr.params.slice();
+          params.push(mapped);
+          return { text: `${expr.text} <= ?`, params };
+        }
         case "in": {
-          if (c.value.length === 0) return sql`1=0`;
-          let params: unknown[] = c.value;
+          if (c.value.length === 0) return { text: "1=0", params: [] };
+          let vals: unknown[] = c.value;
           if (options.mapValue) {
-            params = [];
-            for (let i = 0; i < c.value.length; i++) {
-              params.push(options.mapValue(c.value[i], field));
-            }
+            vals = [];
+            for (let i = 0; i < c.value.length; i++) vals.push(options.mapValue(c.value[i], field));
           }
-          return sql`${expr} IN (${placeholders(params)})`;
+          const ph = placeholders(vals);
+          const params = expr.params.slice();
+          for (let i = 0; i < vals.length; i++) params.push(vals[i]);
+          return { text: `${expr.text} IN (${ph.text})`, params };
         }
         case "not_in": {
-          if (c.value.length === 0) return sql`1=1`;
-          let params: unknown[] = c.value;
+          if (c.value.length === 0) return { text: "1=1", params: [] };
+          let vals: unknown[] = c.value;
           if (options.mapValue) {
-            params = [];
-            for (let i = 0; i < c.value.length; i++) {
-              params.push(options.mapValue(c.value[i], field));
-            }
+            vals = [];
+            for (let i = 0; i < c.value.length; i++) vals.push(options.mapValue(c.value[i], field));
           }
-          return sql`${expr} NOT IN (${placeholders(params)})`;
+          const ph = placeholders(vals);
+          const params = expr.params.slice();
+          for (let i = 0; i < vals.length; i++) params.push(vals[i]);
+          return { text: `${expr.text} NOT IN (${ph.text})`, params };
         }
         default:
           throw new Error("Unsupported where operator");
@@ -237,70 +185,57 @@ function buildWhere<T>(clause: Where<T>, options: WhereOptions): Sql {
 export function where<T>(
   clause: Where<T> | undefined,
   options: WhereOptions & { cursor?: Cursor<T>; sortBy?: SortBy<T>[] },
-): Sql {
-  const parts: Sql[] = [];
+): Fragment {
+  const parts: Fragment[] = [];
 
   if (clause) {
-    parts.push(sql`(${buildWhere(clause, options)})`);
+    const bw = buildWhere(clause, options);
+    parts.push({ text: `(${bw.text})`, params: bw.params });
   }
 
   if (options.cursor) {
     const paginationWhere = getPaginationFilter(options.cursor, options.sortBy);
     if (paginationWhere) {
-      parts.push(sql`(${buildWhere(paginationWhere, options)})`);
+      const bw = buildWhere(paginationWhere, options);
+      parts.push({ text: `(${bw.text})`, params: bw.params });
     }
   }
 
-  return parts.length > 0 ? join(parts, " AND ") : sql`1=1`;
+  return parts.length > 0 ? join(parts, " AND ") : { text: "1=1", params: [] };
 }
 
-/**
- * Prepares a SET clause for UPDATE or UPSERT.
- * Skips undefined values; applies mapValue to each value when provided.
- */
 export function set(
   data: Record<string, unknown>,
   mapValue?: (val: unknown) => unknown,
   quoteChar = '"',
-): Sql {
+): Fragment {
   const fields = Object.keys(data);
-  const parts: Sql[] = [];
+  const parts: Fragment[] = [];
   for (let i = 0; i < fields.length; i++) {
     const f = fields[i]!;
     const val = data[f];
     if (val === undefined) continue;
     const mapped = mapValue ? mapValue(val) : val;
-    parts.push(sql`${id(f, quoteChar)} = ${mapped}`);
+    parts.push({ text: `${id(f, quoteChar).text} = ?`, params: [mapped] });
   }
   if (parts.length === 0) throw new Error("set() called with empty data");
   return join(parts, ", ");
 }
 
-/**
- * Prepares an ORDER BY clause.
- */
-export function sort<T>(model: Model, sortBy: SortBy<T>[], columnExpr: ColumnExprFn): Sql {
+export function sort<T>(model: Model, sortBy: SortBy<T>[], columnExpr: ColumnExprFn): Fragment {
   if (sortBy.length === 0) throw new Error("sort() called with empty sortBy");
-  const parts: Sql[] = [];
+  const parts: Fragment[] = [];
   for (let i = 0; i < sortBy.length; i++) {
     const s = sortBy[i]!;
-    // Pass a type-representative sentinel so columnExpr can apply the right SQL cast
-    // (e.g. ::double precision for number/timestamp, ::boolean for boolean).
     const typeValue: unknown =
       s.type === "number" || s.type === "timestamp" ? 0 : s.type === "boolean" ? true : undefined;
     const expr = columnExpr(model, s.field as string, s.path, typeValue);
     const dir = (s.direction ?? "asc").toUpperCase();
-    parts.push(sql`${expr} ${raw(dir)}`);
+    parts.push({ text: `${expr.text} ${dir}`, params: expr.params });
   }
   return join(parts, ", ");
 }
 
-/**
- * Coerce a bind value for drivers whose binary protocol can't serialize
- * objects/arrays natively (pg, mysql2). Date and Uint8Array pass through —
- * those drivers handle them. Not needed for postgres.js / Bun:SQL, which
- * accept objects via tagged-template binding.
- */
 export function stringifyJsonParam(v: unknown): unknown {
   return v !== null && typeof v === "object" && !(v instanceof Date) && !(v instanceof Uint8Array)
     ? JSON.stringify(v)
@@ -327,17 +262,21 @@ export function extractFields(
 export function selectSql(opts: {
   table: string;
   select: readonly string[] | undefined;
-  where: Sql;
-  orderBy?: Sql;
+  where: Fragment;
+  orderBy?: Fragment;
   limit?: number;
   offset?: number;
-}): Sql {
-  const cols = opts.select && opts.select.length > 0 ? id(opts.select) : raw("*");
-  let q = sql`SELECT ${cols} FROM ${id(opts.table)} WHERE ${opts.where}`;
-  if (opts.orderBy !== undefined) q = sql`${q} ORDER BY ${opts.orderBy}`;
-  if (opts.limit !== undefined) q = sql`${q} LIMIT ${opts.limit}`;
-  if (opts.offset !== undefined) q = sql`${q} OFFSET ${opts.offset}`;
-  return q;
+}): Fragment {
+  const colsText = opts.select && opts.select.length > 0 ? id(opts.select).text : "*";
+  let text = `SELECT ${colsText} FROM ${id(opts.table).text} WHERE ${opts.where.text}`;
+  const params = opts.where.params.slice();
+  if (opts.orderBy !== undefined) {
+    text += ` ORDER BY ${opts.orderBy.text}`;
+    for (let i = 0; i < opts.orderBy.params.length; i++) params.push(opts.orderBy.params[i]);
+  }
+  if (opts.limit !== undefined) text += ` LIMIT ${opts.limit}`;
+  if (opts.offset !== undefined) text += ` OFFSET ${opts.offset}`;
+  return { text, params };
 }
 
 export function insertSql(opts: {
@@ -345,18 +284,32 @@ export function insertSql(opts: {
   fields: readonly string[];
   values: unknown[];
   returning: readonly string[] | undefined;
-}): Sql {
-  const cols = opts.returning && opts.returning.length > 0 ? id(opts.returning) : raw("*");
-  return sql`INSERT INTO ${id(opts.table)} (${id(opts.fields)}) VALUES (${placeholders(opts.values)}) RETURNING ${cols}`;
+}): Fragment {
+  const returningCols = opts.returning && opts.returning.length > 0 ? id(opts.returning).text : "*";
+  const ph = placeholders(opts.values);
+  return {
+    text: `INSERT INTO ${id(opts.table).text} (${id(opts.fields).text}) VALUES (${ph.text}) RETURNING ${returningCols}`,
+    params: opts.values,
+  };
 }
 
-export function updateSql(opts: { table: string; set: Sql; where: Sql; returning?: boolean }): Sql {
-  const base = sql`UPDATE ${id(opts.table)} SET ${opts.set} WHERE ${opts.where}`;
-  return opts.returning === true ? sql`${base} RETURNING *` : base;
+export function updateSql(opts: {
+  table: string;
+  set: Fragment;
+  where: Fragment;
+  returning?: boolean;
+}): Fragment {
+  const text = `UPDATE ${id(opts.table).text} SET ${opts.set.text} WHERE ${opts.where.text}${opts.returning ? " RETURNING *" : ""}`;
+  const params = opts.set.params.slice();
+  for (let i = 0; i < opts.where.params.length; i++) params.push(opts.where.params[i]);
+  return { text, params };
 }
 
-export function deleteSql(opts: { table: string; where: Sql }): Sql {
-  return sql`DELETE FROM ${id(opts.table)} WHERE ${opts.where}`;
+export function deleteSql(opts: { table: string; where: Fragment }): Fragment {
+  return {
+    text: `DELETE FROM ${id(opts.table).text} WHERE ${opts.where.text}`,
+    params: opts.where.params,
+  };
 }
 
 export function upsertSql(opts: {
@@ -364,15 +317,24 @@ export function upsertSql(opts: {
   fields: readonly string[];
   values: unknown[];
   conflictColumns: readonly string[];
-  onConflict: Sql;
+  onConflict: Fragment;
   returning: readonly string[] | undefined;
-}): Sql {
-  const cols = opts.returning && opts.returning.length > 0 ? id(opts.returning) : raw("*");
-  return sql`INSERT INTO ${id(opts.table)} (${id(opts.fields)}) VALUES (${placeholders(opts.values)}) ON CONFLICT (${id(opts.conflictColumns)}) ${opts.onConflict} RETURNING ${cols}`;
+}): Fragment {
+  const returningCols = opts.returning && opts.returning.length > 0 ? id(opts.returning).text : "*";
+  const ph = placeholders(opts.values);
+  const params = ph.params.slice();
+  for (let i = 0; i < opts.onConflict.params.length; i++) params.push(opts.onConflict.params[i]);
+  return {
+    text: `INSERT INTO ${id(opts.table).text} (${id(opts.fields).text}) VALUES (${ph.text}) ON CONFLICT (${id(opts.conflictColumns).text}) ${opts.onConflict.text} RETURNING ${returningCols}`,
+    params,
+  };
 }
 
-export function countSql(opts: { table: string; where: Sql }): Sql {
-  return sql`SELECT COUNT(*) as count FROM ${id(opts.table)} WHERE ${opts.where}`;
+export function countSql(opts: { table: string; where: Fragment }): Fragment {
+  return {
+    text: `SELECT COUNT(*) as count FROM ${id(opts.table).text} WHERE ${opts.where.text}`,
+    params: opts.where.params,
+  };
 }
 
 export function migrateSqls(
@@ -382,30 +344,30 @@ export function migrateSqls(
     quoteChar?: string;
     indexIfNotExists?: boolean;
   },
-): Sql[] {
+): Fragment[] {
   const q = opts.quoteChar ?? '"';
   const ifNotExists = opts.indexIfNotExists ?? true;
   const models = Object.entries(schema);
-  const stmts: Sql[] = [];
+  const stmts: Fragment[] = [];
 
   for (let i = 0; i < models.length; i++) {
     const [name, model] = models[i]!;
     const fields = Object.entries(model.fields);
-    const columnsList: Sql[] = [];
+    const columnsList: Fragment[] = [];
     for (let j = 0; j < fields.length; j++) {
       const [fname, f] = fields[j]!;
-      columnsList.push(
-        sql`${id(fname, q)} ${raw(opts.sqlType(f))}${raw(f.nullable === true ? "" : " NOT NULL")}`,
-      );
+      columnsList.push({
+        text: `${id(fname, q).text} ${opts.sqlType(f)}${f.nullable === true ? "" : " NOT NULL"}`,
+        params: [],
+      });
     }
     const pkFields = getPrimaryKeyFieldNames(model);
-    const pk = sql`PRIMARY KEY (${id(pkFields, q)})`;
-    stmts.push(sql`
-      CREATE TABLE IF NOT EXISTS ${id(name, q)} (
-        ${join(columnsList, ", ")},
-        ${pk}
-      )
-    `);
+    const pkText = `PRIMARY KEY (${id(pkFields, q).text})`;
+    const colsText = join(columnsList, ", ").text;
+    stmts.push({
+      text: `CREATE TABLE IF NOT EXISTS ${id(name, q).text} (${colsText}, ${pkText})`,
+      params: [],
+    });
   }
 
   for (let i = 0; i < models.length; i++) {
@@ -414,16 +376,19 @@ export function migrateSqls(
     for (let j = 0; j < model.indexes.length; j++) {
       const idx = model.indexes[j]!;
       const fields = Array.isArray(idx.field) ? idx.field : [idx.field];
-      const formatted: Sql[] = [];
+      const formatted: Fragment[] = [];
       for (let k = 0; k < fields.length; k++) {
         const f = fields[k]!;
-        formatted.push(sql`${id(f, q)}${raw(idx.order ? ` ${idx.order.toUpperCase()}` : "")}`);
+        formatted.push({
+          text: `${id(f, q).text}${idx.order ? ` ${idx.order.toUpperCase()}` : ""}`,
+          params: [],
+        });
       }
       const ifne = ifNotExists ? "IF NOT EXISTS " : "";
-      stmts.push(sql`
-        CREATE INDEX ${raw(ifne)}${id(`idx_${name}_${j}`, q)}
-        ON ${id(name, q)} (${join(formatted, ", ")})
-      `);
+      stmts.push({
+        text: `CREATE INDEX ${ifne}${id(`idx_${name}_${j}`, q).text} ON ${id(name, q).text} (${join(formatted, ", ").text})`,
+        params: [],
+      });
     }
   }
 

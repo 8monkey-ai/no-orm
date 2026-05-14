@@ -24,17 +24,16 @@ import {
   type RowData,
 } from "./utils/common";
 import {
+  type Fragment,
   type QueryExecutor,
   isQueryExecutor,
-  Sql,
-  sql,
   id,
-  join,
   extractFields,
   where,
   set,
   sort,
   stringifyJsonParam,
+  toNumberedParams,
   selectSql,
   insertSql,
   updateSql,
@@ -92,7 +91,7 @@ function sqlType(field: Field): string {
   }
 }
 
-function toColumnExpr(model: Model, fieldName: string, path?: string[], value?: unknown): Sql {
+function toColumnExpr(model: Model, fieldName: string, path?: string[], value?: unknown): Fragment {
   if (!path || path.length === 0) return id(fieldName);
   const field = model.fields[fieldName];
   if (field?.type !== "json" && field?.type !== "json[]") {
@@ -103,16 +102,14 @@ function toColumnExpr(model: Model, fieldName: string, path?: string[], value?: 
   const isNumeric = typeof hint === "number";
   const isBoolean = typeof hint === "boolean";
 
-  const pathArgs: Sql[] = [id(fieldName)];
-  for (let i = 0; i < path.length; i++) pathArgs.push(sql`${path[i]!}`);
+  // Path elements are schema-defined identifiers; safe to inline as SQL string literals.
+  let pathStr = id(fieldName).text;
+  for (let i = 0; i < path.length; i++) pathStr += `, '${path[i]!}'`;
 
-  let res = sql`jsonb_extract_path_text(${join(pathArgs, ", ")})`;
-  if (isNumeric) {
-    res = sql`(${res})::double precision`;
-  } else if (isBoolean) {
-    res = sql`(${res})::boolean`;
-  }
-  return res;
+  let text = `jsonb_extract_path_text(${pathStr})`;
+  if (isNumeric) text = `(${text})::double precision`;
+  else if (isBoolean) text = `(${text})::boolean`;
+  return { text, params: [] };
 }
 
 // --- Driver detection ---
@@ -143,21 +140,25 @@ type BunSqlResult = Record<string, unknown>[] & {
 
 // --- Executor factories ---
 
+function toTaggedArgs(query: Fragment): [TemplateStringsArray, ...unknown[]] {
+  const parts = query.text.split("?") as string[] & { raw: readonly string[] };
+  parts.raw = parts.slice();
+  return [parts as TemplateStringsArray, ...query.params];
+}
+
 function createPostgresJsExecutor(
   driver: postgres.Sql | postgres.TransactionSql,
   inTransaction = false,
 ): QueryExecutor {
-  const runQuery = (query: Sql): Promise<PostgresJsResult> => {
-    const [strings, ...params] = query.toTaggedArgs();
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- calling driver as tagged template function to avoid .unsafe(); result has .count on the array object
+  const runQuery = (query: Fragment): Promise<PostgresJsResult> => {
+    const [strings, ...params] = toTaggedArgs(query);
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- calling driver as tagged template to use native parameterization; result has .count on the array object
     const run = driver as (s: TemplateStringsArray, ...p: unknown[]) => Promise<PostgresJsResult>;
     return run(strings, ...params);
   };
 
   return {
-    all: (query) => {
-      return runQuery(query);
-    },
+    all: (query) => runQuery(query),
     get: async (query) => {
       const rows = await runQuery(query);
       return rows[0];
@@ -167,8 +168,7 @@ function createPostgresJsExecutor(
       return { changes: rows.count ?? 0 };
     },
     transaction: <T>(fn: (executor: QueryExecutor) => Promise<T>) => {
-      // PostgresAdapter.transaction() short-circuits nested calls with `if (this.executor.inTransaction) return fn(this)`.
-      // This means we only ever enter here when NOT in a transaction, so we always use `begin` and never `savepoint`.
+      // PostgresAdapter.transaction() short-circuits nested calls so we only enter here outside a transaction.
       if ("begin" in driver) {
         // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- T matches return type of fn
         return driver.begin((tx) => fn(createPostgresJsExecutor(tx, true))) as Promise<T>;
@@ -180,8 +180,8 @@ function createPostgresJsExecutor(
 }
 
 function createBunSqlExecutor(bunSql: BunSQL, inTransaction = false): QueryExecutor {
-  const runQuery = (query: Sql): Promise<BunSqlResult> => {
-    const [strings, ...params] = query.toTaggedArgs();
+  const runQuery = (query: Fragment): Promise<BunSqlResult> => {
+    const [strings, ...params] = toTaggedArgs(query);
     // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- bun:sql result has affectedRows/count/command on the array object
     return bunSql(strings, ...params) as Promise<BunSqlResult>;
   };
@@ -211,9 +211,9 @@ function createPgExecutor(
   driver: PgClient | PgPool | PgPoolClient,
   inTransaction = false,
 ): QueryExecutor {
-  function getPrepared(query: Sql) {
-    const text = query.compile((i) => "$" + (i + 1));
-    const values = query.params.map(stringifyJsonParam);
+  function getPrepared(query: Fragment) {
+    const { text, values: rawValues } = toNumberedParams(query);
+    const values = rawValues.map(stringifyJsonParam);
     const name = `q_${fnv1aHash(text)}`;
     return { name, text, values };
   }
@@ -377,10 +377,14 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     if (!Object.keys(dataRecord).some((k) => dataRecord[k] !== undefined))
       return this.find({ model: modelName, where: args.where, select: undefined });
 
+    const innerWhere = where(args.where, { model, columnExpr: toColumnExpr });
     const query = updateSql({
       table: modelName,
       set: set(dataRecord),
-      where: sql`ctid = (SELECT ctid FROM ${id(modelName)} WHERE ${where(args.where, { model, columnExpr: toColumnExpr })} LIMIT 1)`,
+      where: {
+        text: `ctid = (SELECT ctid FROM ${id(modelName).text} WHERE ${innerWhere.text} LIMIT 1)`,
+        params: innerWhere.params,
+      },
       returning: true,
     });
 
@@ -441,19 +445,24 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const hasUpdateFields = Object.keys(rawUpdate).some((k) => rawUpdate[k] !== undefined);
     const primaryKeyFieldNames = getPrimaryKeyFieldNames(model);
 
-    const qualifiedColumnExpr = (m: Model, fieldName: string, path?: string[], value?: unknown) => {
-      if (!path || path.length === 0) return sql`${id(modelName)}.${id(fieldName)}`;
+    const qualifiedColumnExpr = (m: Model, fieldName: string, path?: string[], value?: unknown): Fragment => {
+      if (!path || path.length === 0) return { text: `${id(modelName).text}.${id(fieldName).text}`, params: [] };
       return toColumnExpr(m, fieldName, path, value);
     };
 
-    const onConflict = hasUpdateFields
-      ? args.where
-        ? sql`DO UPDATE SET ${set(rawUpdate)} WHERE ${where(args.where, {
-            model,
-            columnExpr: qualifiedColumnExpr,
-          })}`
-        : sql`DO UPDATE SET ${set(rawUpdate)}`
-      : sql`DO NOTHING`;
+    let onConflict: Fragment;
+    if (!hasUpdateFields) {
+      onConflict = { text: "DO NOTHING", params: [] };
+    } else if (args.where) {
+      const updateSet = set(rawUpdate);
+      const updateWhere = where(args.where, { model, columnExpr: qualifiedColumnExpr });
+      const params = updateSet.params.slice();
+      for (let i = 0; i < updateWhere.params.length; i++) params.push(updateWhere.params[i]);
+      onConflict = { text: `DO UPDATE SET ${updateSet.text} WHERE ${updateWhere.text}`, params };
+    } else {
+      const updateSet = set(rawUpdate);
+      onConflict = { text: `DO UPDATE SET ${updateSet.text}`, params: updateSet.params };
+    }
 
     const query = upsertSql({
       table: modelName,

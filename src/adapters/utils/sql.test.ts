@@ -1,7 +1,17 @@
 import { describe, expect, it } from "bun:test";
 
 import type { Model } from "../../types";
-import { Sql, id, join, placeholders, raw, set, sort, sql, stringifyJsonParam, where } from "./sql";
+import {
+  type Fragment,
+  id,
+  join,
+  placeholders,
+  set,
+  sort,
+  stringifyJsonParam,
+  toNumberedParams,
+  where,
+} from "./sql";
 
 const model: Model = {
   fields: {
@@ -16,41 +26,29 @@ const model: Model = {
 const columnExpr = (_model: Model, fieldName: string) => id(fieldName);
 const boolToInt = (v: unknown) => (typeof v === "boolean" ? (v ? 1 : 0) : v);
 
-function compile(s: Sql): { sql: string; params: unknown[] } {
-  return { sql: s.compile("?"), params: s.params };
+function compile(f: Fragment): { sql: string; params: unknown[] } {
+  return { sql: f.text, params: f.params };
 }
 
-describe("Sql.compile", () => {
-  it("returns the string when there are no params", () => {
-    expect(new Sql(["SELECT 1"], []).compile("?")).toBe("SELECT 1");
+describe("toNumberedParams", () => {
+  it("returns the text unchanged when there are no params", () => {
+    expect(toNumberedParams({ text: "SELECT 1", params: [] })).toEqual({
+      text: "SELECT 1",
+      values: [],
+    });
   });
 
-  it("joins strings with a placeholder string", () => {
-    expect(new Sql(["id = ", ""], ["u1"]).compile("?")).toBe("id = ?");
+  it("replaces ? with $1, $2, ...", () => {
+    expect(toNumberedParams({ text: "a = ? AND b = ?", params: [1, 2] })).toEqual({
+      text: "a = $1 AND b = $2",
+      values: [1, 2],
+    });
   });
 
-  it("uses a function placeholder with correct index", () => {
-    expect(new Sql(["a = ", " AND b = ", ""], [1, 2]).compile((i) => `$${i + 1}`)).toBe(
-      "a = $1 AND b = $2",
-    );
-  });
-});
-
-describe("Sql.toTaggedArgs", () => {
-  it("returns strings with .raw and params spread", () => {
-    const s = new Sql(["before", "after"], [42]);
-    const [strings, ...params] = s.toTaggedArgs();
-    expect(Array.from(strings)).toEqual(["before", "after"]);
-    expect(strings.raw).toEqual(["before", "after"]);
-    expect(params).toEqual([42]);
-  });
-});
-
-describe("raw", () => {
-  it("creates a Sql with no params", () => {
-    const r = raw("SELECT *");
-    expect(r.strings).toEqual(["SELECT *"]);
-    expect(r.params).toEqual([]);
+  it("preserves params array reference", () => {
+    const params = [42];
+    const result = toNumberedParams({ text: "id = ?", params });
+    expect(result.values).toBe(params);
   });
 });
 
@@ -76,33 +74,6 @@ describe("id", () => {
   });
 });
 
-describe("sql tagged template", () => {
-  it("handles a plain string with no interpolations", () => {
-    expect(compile(sql`SELECT 1`)).toEqual({ sql: "SELECT 1", params: [] });
-  });
-
-  it("interpolates scalar values as params", () => {
-    expect(compile(sql`WHERE age > ${25}`)).toEqual({ sql: "WHERE age > ?", params: [25] });
-  });
-
-  it("splices nested Sql instances inline", () => {
-    const inner = sql`age > ${25}`;
-    expect(compile(sql`WHERE ${inner} AND name = ${"Alice"}`)).toEqual({
-      sql: "WHERE age > ? AND name = ?",
-      params: [25, "Alice"],
-    });
-  });
-
-  it("handles multiple nested Sql instances", () => {
-    const a = sql`a = ${1}`;
-    const b = sql`b = ${2}`;
-    expect(compile(sql`SELECT * WHERE ${a} AND ${b}`)).toEqual({
-      sql: "SELECT * WHERE a = ? AND b = ?",
-      params: [1, 2],
-    });
-  });
-});
-
 describe("placeholders", () => {
   it("returns empty for no values", () => {
     expect(compile(placeholders([]))).toEqual({ sql: "", params: [] });
@@ -123,14 +94,25 @@ describe("join", () => {
   });
 
   it("returns the single fragment unchanged", () => {
-    expect(compile(join([sql`a = ${1}`], ", "))).toEqual({ sql: "a = ?", params: [1] });
+    expect(compile(join([{ text: "a = ?", params: [1] }], ", "))).toEqual({
+      sql: "a = ?",
+      params: [1],
+    });
   });
 
-  it("joins multiple fragments with separator", () => {
-    expect(compile(join([sql`a = ${1}`, sql`b = ${2}`, raw("c")], " AND "))).toEqual({
-      sql: "a = ? AND b = ? AND c",
-      params: [1, 2],
-    });
+  it("joins multiple fragments with separator and merges params", () => {
+    expect(
+      compile(
+        join(
+          [
+            { text: "a = ?", params: [1] },
+            { text: "b = ?", params: [2] },
+            { text: "c", params: [] },
+          ],
+          " AND ",
+        ),
+      ),
+    ).toEqual({ sql: "a = ? AND b = ? AND c", params: [1, 2] });
   });
 });
 

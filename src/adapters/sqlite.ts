@@ -24,10 +24,9 @@ import {
   type RowData,
 } from "./utils/common";
 import {
+  type Fragment,
   type QueryExecutor,
   isQueryExecutor,
-  Sql,
-  sql,
   id,
   extractFields,
   where,
@@ -123,13 +122,13 @@ function toJsonPath(path: string[]): string {
   return jsonPath;
 }
 
-function toColumnExpr(model: Model, fieldName: string, path?: string[]): Sql {
+function toColumnExpr(model: Model, fieldName: string, path?: string[]): Fragment {
   if (!path || path.length === 0) return id(fieldName);
   const field = model.fields[fieldName];
   if (field?.type !== "json" && field?.type !== "json[]") {
     throw new Error(`Cannot use JSON path on non-JSON field: ${fieldName}`);
   }
-  return sql`json_extract(${id(fieldName)}, ${toJsonPath(path)})`;
+  return { text: `json_extract(${id(fieldName).text}, ?)`, params: [toJsonPath(path)] };
 }
 
 // --- Driver detection and executors ---
@@ -156,10 +155,10 @@ function createBunSqliteExecutor(driver: BunDatabase, inTransaction = false): Qu
   }
 
   return {
-    all: (query: Sql) => Promise.resolve(getPrepared(query.compile("?")).all(...query.params)),
-    get: (query: Sql) => Promise.resolve(getPrepared(query.compile("?")).get(...query.params)),
-    run: (query: Sql) => {
-      const res = getPrepared(query.compile("?")).run(...query.params);
+    all: (query: Fragment) => Promise.resolve(getPrepared(query.text).all(...query.params)),
+    get: (query: Fragment) => Promise.resolve(getPrepared(query.text).get(...query.params)),
+    run: (query: Fragment) => {
+      const res = getPrepared(query.text).run(...query.params);
       return Promise.resolve({ changes: res.changes });
     },
     transaction: async (fn) => {
@@ -197,10 +196,10 @@ function createBetterSqlite3Executor(
   }
 
   return {
-    all: (query: Sql) => Promise.resolve(getPrepared(query.compile("?")).all(...query.params)),
-    get: (query: Sql) => Promise.resolve(getPrepared(query.compile("?")).get(...query.params)),
-    run: (query: Sql) => {
-      const res = getPrepared(query.compile("?")).run(...query.params);
+    all: (query: Fragment) => Promise.resolve(getPrepared(query.text).all(...query.params)),
+    get: (query: Fragment) => Promise.resolve(getPrepared(query.text).get(...query.params)),
+    run: (query: Fragment) => {
+      const res = getPrepared(query.text).run(...query.params);
       return Promise.resolve({ changes: res.changes });
     },
     transaction: async (fn) => {
@@ -220,13 +219,13 @@ function createBetterSqlite3Executor(
 
 function createSqliteExecutor(driver: SqliteDatabase, inTransaction = false): QueryExecutor {
   return {
-    all: (query: Sql) => driver.all(query.compile("?"), query.params),
-    get: (query: Sql) => driver.get(query.compile("?"), query.params),
-    run: async (query: Sql) => {
+    all: (query: Fragment) => driver.all(query.text, query.params),
+    get: (query: Fragment) => driver.get(query.text, query.params),
+    run: async (query: Fragment) => {
       const res =
         query.params.length === 0
-          ? await driver.run(query.compile("?"))
-          : await driver.run(query.compile("?"), query.params);
+          ? await driver.run(query.text)
+          : await driver.run(query.text, query.params);
       return { changes: res.changes ?? 0 };
     },
     transaction: async (fn) => {
@@ -374,14 +373,14 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     if (!Object.keys(dataRecord).some((k) => dataRecord[k] !== undefined))
       return this.find({ model: modelName, where: args.where, select: undefined });
 
+    const innerWhere = where(args.where, { model, columnExpr: toColumnExpr, mapValue: mapSqliteValue });
     const query = updateSql({
       table: modelName,
       set: set(dataRecord, (v) => mapSqliteValue(v)),
-      where: sql`rowid = (SELECT rowid FROM ${id(modelName)} WHERE ${where(args.where, {
-        model,
-        columnExpr: toColumnExpr,
-        mapValue: mapSqliteValue,
-      })} LIMIT 1)`,
+      where: {
+        text: `rowid = (SELECT rowid FROM ${id(modelName).text} WHERE ${innerWhere.text} LIMIT 1)`,
+        params: innerWhere.params,
+      },
       returning: true,
     });
 
@@ -443,15 +442,19 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     const hasUpdateFields = Object.keys(rawUpdate).some((k) => rawUpdate[k] !== undefined);
     const primaryKeyFieldNames = getPrimaryKeyFieldNames(model);
 
-    const onConflict = hasUpdateFields
-      ? args.where
-        ? sql`DO UPDATE SET ${set(rawUpdate, (v) => mapSqliteValue(v))} WHERE ${where(args.where, {
-            model,
-            columnExpr: toColumnExpr,
-            mapValue: mapSqliteValue,
-          })}`
-        : sql`DO UPDATE SET ${set(rawUpdate, (v) => mapSqliteValue(v))}`
-      : sql`DO NOTHING`;
+    let onConflict: Fragment;
+    if (!hasUpdateFields) {
+      onConflict = { text: "DO NOTHING", params: [] };
+    } else if (args.where) {
+      const updateSet = set(rawUpdate, (v) => mapSqliteValue(v));
+      const updateWhere = where(args.where, { model, columnExpr: toColumnExpr, mapValue: mapSqliteValue });
+      const params = updateSet.params.slice();
+      for (let i = 0; i < updateWhere.params.length; i++) params.push(updateWhere.params[i]);
+      onConflict = { text: `DO UPDATE SET ${updateSet.text} WHERE ${updateWhere.text}`, params };
+    } else {
+      const updateSet = set(rawUpdate, (v) => mapSqliteValue(v));
+      onConflict = { text: `DO UPDATE SET ${updateSet.text}`, params: updateSet.params };
+    }
 
     const query = upsertSql({
       table: modelName,
