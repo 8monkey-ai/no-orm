@@ -198,6 +198,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     const { model, where, data } = args;
     assertNoPrimaryKeyUpdates(this.schema[model]!, data);
     this.assertNoUnknownFields(model, data as Record<string, unknown>);
+    if (Object.keys(data).length === 0) return Promise.resolve(0);
     const heap = this.tables.get(model)!;
 
     let count = 0;

@@ -437,11 +437,16 @@ export class PostgresAdapter<S extends Schema> implements Adapter<S> {
     const hasUpdateFields = Object.keys(rawUpdate).some((k) => rawUpdate[k] !== undefined);
     const primaryKeyFieldNames = getPrimaryKeyFieldNames(model);
 
+    const qualifiedColumnExpr = (m: Model, fieldName: string, path?: string[], value?: unknown) => {
+      if (!path || path.length === 0) return sql`${id(modelName)}.${id(fieldName)}`;
+      return toColumnExpr(m, fieldName, path, value);
+    };
+
     const onConflict = hasUpdateFields
       ? args.where
         ? sql`DO UPDATE SET ${set(rawUpdate)} WHERE ${where(args.where, {
             model,
-            columnExpr: toColumnExpr,
+            columnExpr: qualifiedColumnExpr,
           })}`
         : sql`DO UPDATE SET ${set(rawUpdate)}`
       : sql`DO NOTHING`;
