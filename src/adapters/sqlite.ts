@@ -6,9 +6,9 @@ import type { Database as SqliteDatabase } from "sqlite";
 import type {
   Adapter,
   Field,
+  FieldName,
   InferModel,
   Schema,
-  Select,
   SortBy,
   Where,
   Cursor,
@@ -20,6 +20,8 @@ import {
   getPrimaryKeyFieldNames,
   getPrimaryKeyValues,
   mapNumeric,
+  type Project,
+  type RowData,
 } from "./utils/common";
 import {
   type QueryExecutor,
@@ -60,10 +62,10 @@ const mapSqliteValue = (val: unknown, field?: Field) => {
   return val;
 };
 
-function mapFromRecord<T extends Record<string, unknown>>(
+function mapFromRecord<T extends RowData, F extends FieldName<T> = never>(
   model: Model,
-  record: Record<string, unknown>,
-): T {
+  record: RowData,
+): Project<T, F> {
   const fields = model.fields;
   const keys = Object.keys(record);
   for (let i = 0; i < keys.length; i++) {
@@ -79,8 +81,8 @@ function mapFromRecord<T extends Record<string, unknown>>(
       record[k] = mapNumeric(record[k]);
     }
   }
-  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- mapped fields match the shape of T
-  return record as T;
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- DB returned only the selected columns; body only coerces field types
+  return record as Project<T, F>;
 }
 
 function sqlType(field: Field): string {
@@ -276,10 +278,12 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     return this.executor.transaction((exec) => fn(new SqliteAdapter(this.schema, exec)));
   }
 
-  async create<
-    K extends keyof S & string,
-    T extends Record<string, unknown> = InferModel<S[K]>,
-  >(args: { model: K; data: T; select?: Select<T> }): Promise<T> {
+  async create<K extends keyof S & string, F extends FieldName<InferModel<S[K]>> = never>(args: {
+    model: K;
+    data: InferModel<S[K]>;
+    select?: readonly F[];
+  }): Promise<[F] extends [never] ? InferModel<S[K]> : Pick<InferModel<S[K]>, F>> {
+    type Row = InferModel<S[K]>;
     const { model: modelName, data, select } = args;
     const model = this.schema[modelName]!;
     const { fields, values } = extractFields(data as Record<string, unknown>, mapSqliteValue);
@@ -289,19 +293,21 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     if (row === undefined || row === null) {
       const res = await this.find({
         model: modelName,
-        where: buildPrimaryKeyFilter<T>(model, getPrimaryKeyValues(model, data)),
+        where: buildPrimaryKeyFilter<Row>(model, getPrimaryKeyValues(model, data)),
         select,
       });
       if (!res) throw new Error("Failed to insert record");
       return res;
     }
-    return mapFromRecord<T>(model, row);
+    return mapFromRecord<Row, F>(model, row);
   }
 
-  async find<
-    K extends keyof S & string,
-    T extends Record<string, unknown> = InferModel<S[K]>,
-  >(args: { model: K; where: Where<T>; select?: Select<T> }): Promise<T | null> {
+  async find<K extends keyof S & string, F extends FieldName<InferModel<S[K]>> = never>(args: {
+    model: K;
+    where: Where<InferModel<S[K]>>;
+    select?: readonly F[];
+  }): Promise<([F] extends [never] ? InferModel<S[K]> : Pick<InferModel<S[K]>, F>) | null> {
+    type Row = InferModel<S[K]>;
     const { model: modelName, select } = args;
     const model = this.schema[modelName]!;
     const query = selectSql({
@@ -313,21 +319,19 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
 
     const row = await this.executor.get(query);
     if (row === undefined || row === null) return null;
-    return mapFromRecord<T>(model, row);
+    return mapFromRecord<Row, F>(model, row);
   }
 
-  async findMany<
-    K extends keyof S & string,
-    T extends Record<string, unknown> = InferModel<S[K]>,
-  >(args: {
+  async findMany<K extends keyof S & string, F extends FieldName<InferModel<S[K]>> = never>(args: {
     model: K;
-    where?: Where<T>;
-    select?: Select<T>;
-    sortBy?: SortBy<T>[];
+    where?: Where<InferModel<S[K]>>;
+    select?: readonly F[];
+    sortBy?: SortBy<InferModel<S[K]>>[];
     limit?: number;
     offset?: number;
-    cursor?: Cursor<T>;
-  }): Promise<T[]> {
+    cursor?: Cursor<InferModel<S[K]>>;
+  }): Promise<([F] extends [never] ? InferModel<S[K]> : Pick<InferModel<S[K]>, F>)[]> {
+    type Row = InferModel<S[K]>;
     const { model: modelName, select, sortBy, limit, offset, cursor } = args;
     const model = this.schema[modelName]!;
     const query = selectSql({
@@ -346,9 +350,9 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     });
     const rows = await this.executor.all(query);
 
-    const result: T[] = [];
+    const result: Project<Row, F>[] = [];
     for (let i = 0; i < rows.length; i++) {
-      result.push(mapFromRecord<T>(model, rows[i]!));
+      result.push(mapFromRecord<Row, F>(model, rows[i]!));
     }
     return result;
   }
@@ -356,10 +360,12 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
   /**
    * Updates the first record matching the criteria. Primary key updates are rejected.
    */
-  async update<
-    K extends keyof S & string,
-    T extends Record<string, unknown> = InferModel<S[K]>,
-  >(args: { model: K; data: Partial<T>; where: Where<T> }): Promise<T | null> {
+  async update<K extends keyof S & string>(args: {
+    model: K;
+    where: Where<InferModel<S[K]>>;
+    data: Partial<InferModel<S[K]>>;
+  }): Promise<InferModel<S[K]> | null> {
+    type Row = InferModel<S[K]>;
     const { model: modelName, data } = args;
     const model = this.schema[modelName]!;
     assertNoPrimaryKeyUpdates(model, data);
@@ -382,16 +388,17 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     const row = await this.executor.get(query);
     if (row === undefined || row === null)
       return this.find({ model: modelName, where: args.where });
-    return mapFromRecord<T>(model, row);
+    return mapFromRecord<Row>(model, row);
   }
 
   /**
    * Updates all records matching the criteria. Primary key updates are rejected.
    */
-  async updateMany<
-    K extends keyof S & string,
-    T extends Record<string, unknown> = InferModel<S[K]>,
-  >(args: { model: K; where?: Where<T>; data: Partial<T> }): Promise<number> {
+  async updateMany<K extends keyof S & string>(args: {
+    model: K;
+    where?: Where<InferModel<S[K]>>;
+    data: Partial<InferModel<S[K]>>;
+  }): Promise<number> {
     const { model: modelName, data } = args;
     const model = this.schema[modelName]!;
     assertNoPrimaryKeyUpdates(model, data);
@@ -415,16 +422,14 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
    * is only updated if the condition is met (acting as a predicate). Primary key
    * updates are rejected.
    */
-  async upsert<
-    K extends keyof S & string,
-    T extends Record<string, unknown> = InferModel<S[K]>,
-  >(args: {
+  async upsert<K extends keyof S & string, F extends FieldName<InferModel<S[K]>> = never>(args: {
     model: K;
-    create: T;
-    update: Partial<T>;
-    where?: Where<T>;
-    select?: Select<T>;
-  }): Promise<T> {
+    create: InferModel<S[K]>;
+    update: Partial<InferModel<S[K]>>;
+    where?: Where<InferModel<S[K]>>;
+    select?: readonly F[];
+  }): Promise<[F] extends [never] ? InferModel<S[K]> : Pick<InferModel<S[K]>, F>> {
+    type Row = InferModel<S[K]>;
     const { model: modelName, create: createData, update: updateData, select } = args;
     const model = this.schema[modelName]!;
     assertNoPrimaryKeyUpdates(model, updateData);
@@ -459,22 +464,22 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
 
     const row = await this.executor.get(query);
     if (row !== undefined && row !== null) {
-      return mapFromRecord<T>(model, row);
+      return mapFromRecord<Row, F>(model, row);
     }
 
     const existing = await this.find({
       model: modelName,
-      where: buildPrimaryKeyFilter<T>(model, getPrimaryKeyValues(model, createData)),
+      where: buildPrimaryKeyFilter<Row>(model, getPrimaryKeyValues(model, createData)),
       select,
     });
     if (existing === null) throw new Error("Failed to refetch record after upsert");
     return existing;
   }
 
-  async delete<
-    K extends keyof S & string,
-    T extends Record<string, unknown> = InferModel<S[K]>,
-  >(args: { model: K; where: Where<T> }): Promise<void> {
+  async delete<K extends keyof S & string>(args: {
+    model: K;
+    where: Where<InferModel<S[K]>>;
+  }): Promise<void> {
     const { model: modelName } = args;
     const model = this.schema[modelName]!;
     const query = deleteSql({
@@ -484,10 +489,10 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     await this.executor.run(query);
   }
 
-  async deleteMany<
-    K extends keyof S & string,
-    T extends Record<string, unknown> = InferModel<S[K]>,
-  >(args: { model: K; where?: Where<T> }): Promise<number> {
+  async deleteMany<K extends keyof S & string>(args: {
+    model: K;
+    where?: Where<InferModel<S[K]>>;
+  }): Promise<number> {
     const { model: modelName } = args;
     const model = this.schema[modelName]!;
     const query = deleteSql({
@@ -498,10 +503,10 @@ export class SqliteAdapter<S extends Schema> implements Adapter<S> {
     return res.changes;
   }
 
-  async count<
-    K extends keyof S & string,
-    T extends Record<string, unknown> = InferModel<S[K]>,
-  >(args: { model: K; where?: Where<T> }): Promise<number> {
+  async count<K extends keyof S & string>(args: {
+    model: K;
+    where?: Where<InferModel<S[K]>>;
+  }): Promise<number> {
     const { model: modelName } = args;
     const model = this.schema[modelName]!;
     const query = countSql({

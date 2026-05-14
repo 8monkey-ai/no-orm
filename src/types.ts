@@ -70,35 +70,32 @@ export interface Adapter<S extends Schema = Schema> {
    * Inserts a new record.
    * @throws Error if a record with the same primary key already exists.
    */
-  create<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
+  create<K extends keyof S & string, F extends FieldName<InferModel<S[K]>> = never>(args: {
     model: K;
-    data: T;
-    select?: Select<T>;
-  }): Promise<T>;
+    data: InferModel<S[K]>;
+    select?: readonly F[];
+  }): Promise<[F] extends [never] ? InferModel<S[K]> : Pick<InferModel<S[K]>, F>>;
 
   /**
    * Updates a single record matching the mandatory 'where' clause.
    * Primary key fields in 'data' are forbidden or ignored to prevent identity swaps.
    * @returns The updated record, or null if no record matched 'where'.
    */
-  update<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
+  update<K extends keyof S & string>(args: {
     model: K;
-    where: Where<T>;
-    data: Partial<T>;
-  }): Promise<T | null>;
+    where: Where<InferModel<S[K]>>;
+    data: Partial<InferModel<S[K]>>;
+  }): Promise<InferModel<S[K]> | null>;
 
   /**
    * Updates multiple records matching the 'where' clause.
    * Primary key fields in 'data' are forbidden or ignored.
    * @returns The number of records updated.
    */
-  updateMany<
-    K extends keyof S & string,
-    T extends Record<string, unknown> = InferModel<S[K]>,
-  >(args: {
+  updateMany<K extends keyof S & string>(args: {
     model: K;
-    where?: Where<T>;
-    data: Partial<T>;
+    where?: Where<InferModel<S[K]>>;
+    data: Partial<InferModel<S[K]>>;
   }): Promise<number>;
 
   /**
@@ -107,62 +104,59 @@ export interface Adapter<S extends Schema = Schema> {
    * If the record exists, 'update' is applied only if it satisfies the optional 'where' predicate.
    * If the record does not exist, 'create' is applied.
    */
-  upsert<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
+  upsert<K extends keyof S & string, F extends FieldName<InferModel<S[K]>> = never>(args: {
     model: K;
-    create: T;
-    update: Partial<T>;
-    where?: Where<T>;
-    select?: Select<T>;
-  }): Promise<T>;
+    create: InferModel<S[K]>;
+    update: Partial<InferModel<S[K]>>;
+    where?: Where<InferModel<S[K]>>;
+    select?: readonly F[];
+  }): Promise<[F] extends [never] ? InferModel<S[K]> : Pick<InferModel<S[K]>, F>>;
 
   /**
    * Deletes a single record matching the 'where' clause.
    */
-  delete<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
+  delete<K extends keyof S & string>(args: {
     model: K;
-    where: Where<T>;
+    where: Where<InferModel<S[K]>>;
   }): Promise<void>;
 
   /**
    * Deletes multiple records matching the 'where' clause.
    * @returns The number of records deleted.
    */
-  deleteMany<
-    K extends keyof S & string,
-    T extends Record<string, unknown> = InferModel<S[K]>,
-  >(args: {
+  deleteMany<K extends keyof S & string>(args: {
     model: K;
-    where?: Where<T>;
+    where?: Where<InferModel<S[K]>>;
   }): Promise<number>;
 
   /**
    * Finds the first record matching the 'where' clause.
    */
-  find<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
+  find<K extends keyof S & string, F extends FieldName<InferModel<S[K]>> = never>(args: {
     model: K;
-    where: Where<T>;
-    select?: Select<T>;
-  }): Promise<T | null>;
+    where: Where<InferModel<S[K]>>;
+    select?: readonly F[];
+  }): Promise<([F] extends [never] ? InferModel<S[K]> : Pick<InferModel<S[K]>, F>) | null>;
 
   /**
    * Finds all records matching the 'where' clause with sorting and pagination support.
    */
-  findMany<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
+  findMany<K extends keyof S & string, F extends FieldName<InferModel<S[K]>> = never>(args: {
     model: K;
-    where?: Where<T>;
-    select?: Select<T>;
-    sortBy?: SortBy<T>[];
+    where?: Where<InferModel<S[K]>>;
+    select?: readonly F[];
+    sortBy?: SortBy<InferModel<S[K]>>[];
     limit?: number;
     offset?: number;
-    cursor?: Cursor<T>;
-  }): Promise<T[]>;
+    cursor?: Cursor<InferModel<S[K]>>;
+  }): Promise<([F] extends [never] ? InferModel<S[K]> : Pick<InferModel<S[K]>, F>)[]>;
 
   /**
    * Returns the count of records matching the 'where' clause.
    */
-  count<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
+  count<K extends keyof S & string>(args: {
     model: K;
-    where?: Where<T>;
+    where?: Where<InferModel<S[K]>>;
   }): Promise<number>;
 }
 

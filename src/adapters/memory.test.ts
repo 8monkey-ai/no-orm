@@ -269,7 +269,7 @@ describe("MemoryAdapter", () => {
       data: { id: "u1", name: "Alice", age: 25, is_active: true, metadata: null },
     });
 
-    await adapter.update<"users", User>({
+    await adapter.update({
       model: "users",
       where: { field: "id", op: "eq", value: "u1" },
       data: { age: 26 },
@@ -306,7 +306,7 @@ describe("MemoryAdapter", () => {
   });
 
   it("should return null when updating non-existent record", async () => {
-    const result = await adapter.update<"users", User>({
+    const result = await adapter.update({
       model: "users",
       where: { field: "id", op: "eq", value: "nonexistent" },
       data: { age: 99 },
@@ -330,7 +330,7 @@ describe("MemoryAdapter", () => {
       data: { id: "u3", name: "Charlie", age: 35, is_active: false, metadata: null },
     });
 
-    const count = await adapter.updateMany<"users", User>({
+    const count = await adapter.updateMany({
       model: "users",
       where: { field: "is_active", op: "eq", value: true },
       data: { age: 99 },
@@ -443,6 +443,7 @@ describe("MemoryAdapter", () => {
       data: { id: "u1", name: "Alice", age: 25, is_active: true, metadata: null },
     });
 
+    // eslint-disable-next-line typescript-eslint/await-thenable, typescript-eslint/no-confusing-void-expression -- bun test .rejects.toThrow() is typed as void but is awaitable at runtime
     await expect(
       adapter.transaction(async (tx) => {
         await tx.create({

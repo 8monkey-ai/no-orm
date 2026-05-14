@@ -1,5 +1,8 @@
 import type { Cursor, FieldName, Model, SortBy, Where } from "../../types";
 
+export type RowData = Record<string, unknown>;
+export type Project<T, F extends FieldName<T>> = [F] extends [never] ? T : Pick<T, F>;
+
 export type WhereLeaf<T = Record<string, unknown>> = Extract<Where<T>, { field: unknown }>;
 
 export interface WhereVisitor<R, T = Record<string, unknown>> {
@@ -7,6 +10,8 @@ export interface WhereVisitor<R, T = Record<string, unknown>> {
   and: (children: R[]) => R;
   or: (children: R[]) => R;
 }
+
+type PaginationCriterion<T> = { field: FieldName<T>; direction: "asc" | "desc"; path?: string[] };
 
 /**
  * Iterative fold over a Where AST. The traversal is backend-agnostic;
@@ -151,8 +156,7 @@ export function getPaginationFilter<T = Record<string, unknown>>(
     for (let j = 0; j < i; j++) {
       const prev = criteria[j]!;
       andClauses.push({
-        // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- criteria field is guaranteed to be in T
-        field: prev.field as FieldName<T>,
+        field: prev.field,
         path: prev.path,
         op: "eq",
         value: cursorValues[prev.field],
@@ -160,8 +164,7 @@ export function getPaginationFilter<T = Record<string, unknown>>(
     }
     const curr = criteria[i]!;
     andClauses.push({
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- criteria field is guaranteed to be in T
-      field: curr.field as FieldName<T>,
+      field: curr.field,
       path: curr.path,
       op: curr.direction === "desc" ? "lt" : "gt",
       value: cursorValues[curr.field],
@@ -178,9 +181,9 @@ export function getPaginationFilter<T = Record<string, unknown>>(
 export function getPaginationCriteria<T = Record<string, unknown>>(
   cursor: Cursor<T>,
   sortBy?: SortBy<T>[],
-): { field: string; direction: "asc" | "desc"; path?: string[] }[] {
+): PaginationCriterion<T>[] {
   const cursorValues = cursor.after as Record<string, unknown>;
-  const criteria = [];
+  const criteria: PaginationCriterion<T>[] = [];
   if (sortBy !== undefined && sortBy.length > 0) {
     for (let i = 0; i < sortBy.length; i++) {
       const s = sortBy[i]!;
@@ -191,7 +194,8 @@ export function getPaginationCriteria<T = Record<string, unknown>>(
   } else {
     const keys = Object.keys(cursorValues);
     for (let i = 0; i < keys.length; i++) {
-      criteria.push({ field: keys[i]!, direction: "asc" as const, path: undefined });
+      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- cursor keys are validated by callers against T
+      criteria.push({ field: keys[i]! as FieldName<T>, direction: "asc", path: undefined });
     }
   }
   return criteria;

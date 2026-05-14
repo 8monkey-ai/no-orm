@@ -1,6 +1,6 @@
 import { LRUCache } from "lru-cache";
 
-import type { Adapter, Cursor, InferModel, Schema, Select, SortBy, Where } from "../types";
+import type { Adapter, Cursor, FieldName, InferModel, Schema, SortBy, Where } from "../types";
 import {
   assertNoPrimaryKeyUpdates,
   getNestedValue,
@@ -8,9 +8,9 @@ import {
   getPrimaryKeyFieldNames,
   getPrimaryKeyValues,
   walkWhere,
+  type Project,
+  type RowData,
 } from "./utils/common";
-
-type RowData = Record<string, unknown>;
 
 const DEFAULT_MAX_ITEMS = 1000;
 
@@ -28,8 +28,8 @@ export interface MemoryAdapterOptions {
  * - O(1) Removals: Uses an index map and swap-and-pop to remove evicted rows without array shifts.
  */
 export class MemoryAdapter<S extends Schema> implements Adapter<S> {
-  private tables = new Map<keyof S, RowData[]>();
-  private pkIndexes = new Map<keyof S, Map<string, RowData>>();
+  private tables = new Map<keyof S & string, RowData[]>();
+  private pkIndexes = new Map<keyof S & string, Map<string, RowData>>();
   private indexMap = new Map<RowData, number>();
   private globalLRU: LRUCache<RowData, keyof S & string>;
 
@@ -46,7 +46,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
       },
     });
 
-    const keys = Object.keys(this.schema) as (keyof S)[];
+    const keys = Object.keys(this.schema) as (keyof S & string)[];
     for (let i = 0; i < keys.length; i++) {
       const key = keys[i]!;
       this.tables.set(key, []);
@@ -59,9 +59,12 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
   }
 
   transaction<T>(fn: (tx: Adapter<S>) => Promise<T>): Promise<T> {
-    const snapshot = new Map<keyof S, RowData[]>();
+    const snapshot = new Map<keyof S & string, RowData[]>();
     for (const [model, rows] of this.tables) {
-      snapshot.set(model, rows.map((row) => structuredClone(row)));
+      snapshot.set(
+        model,
+        rows.map((row) => structuredClone(row)),
+      );
     }
 
     return fn(this).catch((err: unknown) => {
@@ -78,9 +81,9 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
         for (const row of rows) {
           const idx = heap.length;
           heap.push(row);
-          pkIndex.set(this.getPrimaryKeyHash(model as string, row), row);
+          pkIndex.set(this.getPrimaryKeyHash(model, row), row);
           this.indexMap.set(row, idx);
-          this.globalLRU.set(row, model as keyof S & string);
+          this.globalLRU.set(row, model);
         }
       }
 
@@ -88,15 +91,16 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     });
   }
 
-  create<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
+  create<K extends keyof S & string, F extends FieldName<InferModel<S[K]>> = never>(args: {
     model: K;
-    data: T;
-    select?: Select<T>;
-  }): Promise<T> {
+    data: InferModel<S[K]>;
+    select?: readonly F[];
+  }): Promise<[F] extends [never] ? InferModel<S[K]> : Pick<InferModel<S[K]>, F>> {
+    type Row = InferModel<S[K]>;
     const { model, data, select } = args;
-    this.assertNoUnknownFields(model, data);
+    this.assertNoUnknownFields(model, data as Record<string, unknown>);
     const pkIndex = this.pkIndexes.get(model)!;
-    const pkValue = this.getPrimaryKeyHash(model, data);
+    const pkValue = this.getPrimaryKeyHash(model, data as Record<string, unknown>);
 
     if (pkIndex.has(pkValue)) {
       return Promise.reject(
@@ -113,14 +117,15 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     this.indexMap.set(record, index);
     this.globalLRU.set(record, model);
 
-    return Promise.resolve(this.mapFromRecord(record, select));
+    return Promise.resolve(this.mapFromRecord<Row, F>(record, select));
   }
 
-  find<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
+  find<K extends keyof S & string, F extends FieldName<InferModel<S[K]>> = never>(args: {
     model: K;
-    where: Where<T>;
-    select?: Select<T>;
-  }): Promise<T | null> {
+    where: Where<InferModel<S[K]>>;
+    select?: readonly F[];
+  }): Promise<([F] extends [never] ? InferModel<S[K]> : Pick<InferModel<S[K]>, F>) | null> {
+    type Row = InferModel<S[K]>;
     const { model, where, select } = args;
 
     // Fast path: PK lookup
@@ -135,7 +140,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
       const row = this.pkIndexes.get(model)!.get(pkValue);
       if (row && this.matchesWhere(where, row)) {
         this.globalLRU.get(row); // Touch for LRU
-        return Promise.resolve(this.mapFromRecord(row, select));
+        return Promise.resolve(this.mapFromRecord<Row, F>(row, select));
       }
     }
 
@@ -144,21 +149,22 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
       const value = heap[i]!;
       if (this.matchesWhere(where, value)) {
         this.globalLRU.get(value); // Touch for LRU
-        return Promise.resolve(this.mapFromRecord(value, select));
+        return Promise.resolve(this.mapFromRecord<Row, F>(value, select));
       }
     }
     return Promise.resolve(null);
   }
 
-  findMany<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
+  findMany<K extends keyof S & string, F extends FieldName<InferModel<S[K]>> = never>(args: {
     model: K;
-    where?: Where<T>;
-    select?: Select<T>;
-    sortBy?: SortBy<T>[];
+    where?: Where<InferModel<S[K]>>;
+    select?: readonly F[];
+    sortBy?: SortBy<InferModel<S[K]>>[];
     limit?: number;
     offset?: number;
-    cursor?: Cursor<T>;
-  }): Promise<T[]> {
+    cursor?: Cursor<InferModel<S[K]>>;
+  }): Promise<([F] extends [never] ? InferModel<S[K]> : Pick<InferModel<S[K]>, F>)[]> {
+    type Row = InferModel<S[K]>;
     const { model, where, select, sortBy, limit, offset, cursor } = args;
     const heap = this.tables.get(model)!;
 
@@ -181,11 +187,11 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
 
     const start = offset ?? 0;
     const end = limit === undefined ? out.length : start + limit;
-    const final: T[] = [];
+    const final: Project<Row, F>[] = [];
     for (let i = start; i < end && i < out.length; i++) {
       const r = out[i]!;
       this.globalLRU.get(r); // Touch for LRU
-      final.push(this.mapFromRecord<T>(r, select));
+      final.push(this.mapFromRecord<Row, F>(r, select));
     }
     return Promise.resolve(final);
   }
@@ -203,11 +209,12 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
   /**
    * Updates the first record matching the criteria. Primary key updates are rejected.
    */
-  update<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
+  update<K extends keyof S & string>(args: {
     model: K;
-    where: Where<T>;
-    data: Partial<T>;
-  }): Promise<T | null> {
+    where: Where<InferModel<S[K]>>;
+    data: Partial<InferModel<S[K]>>;
+  }): Promise<InferModel<S[K]> | null> {
+    type Row = InferModel<S[K]>;
     const { model, where, data } = args;
     const patch = this.definedPatch(data as Record<string, unknown>);
     assertNoPrimaryKeyUpdates(this.schema[model]!, patch);
@@ -219,7 +226,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
       if (this.matchesWhere(where, value)) {
         const updated: RowData = Object.assign(value, patch);
         this.globalLRU.get(updated); // Touch for LRU
-        return Promise.resolve(this.mapFromRecord<T>(updated));
+        return Promise.resolve(this.mapFromRecord<Row>(updated));
       }
     }
     return Promise.resolve(null);
@@ -228,10 +235,11 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
   /**
    * Updates all records matching the criteria. Primary key updates are rejected.
    */
-  updateMany<
-    K extends keyof S & string,
-    T extends Record<string, unknown> = InferModel<S[K]>,
-  >(args: { model: K; where?: Where<T>; data: Partial<T> }): Promise<number> {
+  updateMany<K extends keyof S & string>(args: {
+    model: K;
+    where?: Where<InferModel<S[K]>>;
+    data: Partial<InferModel<S[K]>>;
+  }): Promise<number> {
     const { model, where, data } = args;
     const patch = this.definedPatch(data as Record<string, unknown>);
     assertNoPrimaryKeyUpdates(this.schema[model]!, patch);
@@ -258,37 +266,38 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
    * is only updated if the condition is met (acting as a predicate). Primary key
    * updates are rejected.
    */
-  upsert<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
+  upsert<K extends keyof S & string, F extends FieldName<InferModel<S[K]>> = never>(args: {
     model: K;
-    create: T;
-    update: Partial<T>;
-    where?: Where<T>;
-    select?: Select<T>;
-  }): Promise<T> {
+    create: InferModel<S[K]>;
+    update: Partial<InferModel<S[K]>>;
+    where?: Where<InferModel<S[K]>>;
+    select?: readonly F[];
+  }): Promise<[F] extends [never] ? InferModel<S[K]> : Pick<InferModel<S[K]>, F>> {
+    type Row = InferModel<S[K]>;
     const { model, create, update, where, select } = args;
     const patch = this.definedPatch(update as Record<string, unknown>);
     assertNoPrimaryKeyUpdates(this.schema[model]!, patch);
-    this.assertNoUnknownFields(model, create);
+    this.assertNoUnknownFields(model, create as Record<string, unknown>);
     this.assertNoUnknownFields(model, patch);
-    const pkValue = this.getPrimaryKeyHash(model, create);
+    const pkValue = this.getPrimaryKeyHash(model, create as Record<string, unknown>);
     const existing = this.pkIndexes.get(model)!.get(pkValue);
 
     if (existing !== undefined) {
       if (this.matchesWhere(where, existing)) {
         const updated: RowData = Object.assign(existing, patch);
         this.globalLRU.get(updated); // Touch for LRU
-        return Promise.resolve(this.mapFromRecord(updated, select));
+        return Promise.resolve(this.mapFromRecord<Row, F>(updated, select));
       }
       this.globalLRU.get(existing);
-      return Promise.resolve(this.mapFromRecord(existing, select));
+      return Promise.resolve(this.mapFromRecord<Row, F>(existing, select));
     }
 
     return this.create({ model, data: create, select });
   }
 
-  delete<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
+  delete<K extends keyof S & string>(args: {
     model: K;
-    where: Where<T>;
+    where: Where<InferModel<S[K]>>;
   }): Promise<void> {
     const { model, where } = args;
     const heap = this.tables.get(model)!;
@@ -304,10 +313,10 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     return Promise.resolve();
   }
 
-  deleteMany<
-    K extends keyof S & string,
-    T extends Record<string, unknown> = InferModel<S[K]>,
-  >(args: { model: K; where?: Where<T> }): Promise<number> {
+  deleteMany<K extends keyof S & string>(args: {
+    model: K;
+    where?: Where<InferModel<S[K]>>;
+  }): Promise<number> {
     const { model, where } = args;
     const heap = this.tables.get(model)!;
     const toDelete: RowData[] = [];
@@ -326,9 +335,9 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     return Promise.resolve(toDelete.length);
   }
 
-  count<K extends keyof S & string, T extends Record<string, unknown> = InferModel<S[K]>>(args: {
+  count<K extends keyof S & string>(args: {
     model: K;
-    where?: Where<T>;
+    where?: Where<InferModel<S[K]>>;
   }): Promise<number> {
     const { model, where } = args;
     const heap = this.tables.get(model)!;
@@ -376,8 +385,8 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     pkIndex.delete(pkValue);
   }
 
-  private getPrimaryKeyHash(modelName: string, data: Record<string, unknown>): string {
-    const modelSpec = this.schema[modelName as keyof S & string]!;
+  private getPrimaryKeyHash(modelName: keyof S & string, data: Record<string, unknown>): string {
+    const modelSpec = this.schema[modelName]!;
     const primaryKeyValues = getPrimaryKeyValues(modelSpec, data);
     const primaryKeyFieldNames = getPrimaryKeyFieldNames(modelSpec);
     const tuple: unknown[] = [];
@@ -422,19 +431,25 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     });
   }
 
-  private mapFromRecord<T extends Record<string, unknown>>(record: RowData, select?: Select<T>): T {
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- record matches shape of T
-    if (select === undefined) return Object.assign({}, record) as T;
-    const res: RowData = {};
-    for (let i = 0; i < select.length; i++) {
-      const k = select[i]!;
-      res[k as string] = record[k as string] ?? null;
+  private mapFromRecord<T extends RowData, F extends FieldName<T> = never>(
+    record: RowData,
+    select?: readonly F[],
+  ): Project<T, F> {
+    let res: RowData;
+    if (select === undefined) {
+      res = Object.assign({}, record);
+    } else {
+      res = {};
+      for (let i = 0; i < select.length; i++) {
+        const k = select[i]!;
+        res[k] = record[k] ?? null;
+      }
     }
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- projection matches T
-    return res as T;
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- adapter storage rows match the requested schema row or projection type
+    return res as Project<T, F>;
   }
 
-  private filterByCursor<T extends Record<string, unknown>>(
+  private filterByCursor<T extends RowData>(
     results: RowData[],
     cursor: Cursor<T>,
     sortBy?: SortBy<T>[],
@@ -452,10 +467,7 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
     return filtered;
   }
 
-  private applySort<T extends Record<string, unknown>>(
-    results: RowData[],
-    sortBy: SortBy<T>[],
-  ): RowData[] {
+  private applySort<T extends RowData>(results: RowData[], sortBy: SortBy<T>[]): RowData[] {
     const sorted = results.slice();
     sorted.sort((a, b) => {
       for (let i = 0; i < sortBy.length; i++) {
