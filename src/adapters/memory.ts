@@ -59,36 +59,8 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
   }
 
   transaction<T>(fn: (tx: Adapter<S>) => Promise<T>): Promise<T> {
-    const snapshot = new Map<keyof S & string, RowData[]>();
-    for (const [model, rows] of this.tables) {
-      snapshot.set(
-        model,
-        rows.map((row) => structuredClone(row)),
-      );
-    }
-
-    return fn(this).catch((err: unknown) => {
-      for (const [model] of this.tables) {
-        this.tables.get(model)!.length = 0;
-        this.pkIndexes.get(model)!.clear();
-      }
-      this.indexMap.clear();
-      this.globalLRU.clear();
-
-      for (const [model, rows] of snapshot) {
-        const heap = this.tables.get(model)!;
-        const pkIndex = this.pkIndexes.get(model)!;
-        for (const row of rows) {
-          const idx = heap.length;
-          heap.push(row);
-          pkIndex.set(this.getPrimaryKeyHash(model, row), row);
-          this.indexMap.set(row, idx);
-          this.globalLRU.set(row, model);
-        }
-      }
-
-      throw err;
-    });
+    // Transactions are not supported; operations are executed directly without rollback on error.
+    return fn(this);
   }
 
   create<K extends keyof S & string, F extends FieldName<InferModel<S[K]>> = never>(args: {
