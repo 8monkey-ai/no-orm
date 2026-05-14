@@ -329,7 +329,9 @@ export class MemoryAdapter<S extends Schema> implements Adapter<S> {
 
   private assertNoUnknownFields(model: keyof S & string, data: Record<string, unknown>): void {
     const knownFields = this.schema[model]!.fields;
-    for (const key of Object.keys(data)) {
+    const keys = Object.keys(data);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i]!;
       if (!(key in knownFields)) {
         throw new Error(`Unknown field "${key}" in model "${model}"`);
       }
