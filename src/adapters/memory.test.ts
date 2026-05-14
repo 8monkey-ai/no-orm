@@ -660,7 +660,12 @@ describe("MemoryAdapter", () => {
         { field: "age", direction: "asc" },
         { field: "id", direction: "asc" },
       ],
-      cursor: { after: { age: 20, id: "u2" } },
+      cursor: {
+        after: [
+          { field: "age", value: 20 },
+          { field: "id", value: "u2" },
+        ],
+      },
     });
     expect(p2).toHaveLength(1);
     expect(p2[0]?.["id"]).toBe("u3");

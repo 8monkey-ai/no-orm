@@ -194,5 +194,5 @@ export interface SortBy<T = Record<string, unknown>> {
 }
 
 export interface Cursor<T = Record<string, unknown>> {
-  after: Partial<{ [K in FieldName<T>]: unknown }>;
+  after: Array<{ field: FieldName<T>; path?: string[]; value: unknown }>;
 }

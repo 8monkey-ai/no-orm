@@ -409,7 +409,10 @@ describe("SqliteAdapter", () => {
           { field: "name", direction: "desc" },
         ],
         cursor: {
-          after: { age: 30, name: "B" },
+          after: [
+            { field: "age", value: 30 },
+            { field: "name", value: "B" },
+          ],
         },
         limit: 3,
       });
@@ -465,7 +468,7 @@ describe("SqliteAdapter", () => {
         const result = await adapter.findMany({
           model: "users",
           sortBy: [{ field: "age", direction: "asc" }],
-          cursor: { after: { age: 22 } },
+          cursor: { after: [{ field: "age", value: 22 }] },
           limit: 2,
         });
 
@@ -477,7 +480,7 @@ describe("SqliteAdapter", () => {
         const result = await adapter.findMany({
           model: "users",
           sortBy: [{ field: "age", direction: "desc" }],
-          cursor: { after: { age: 24 } },
+          cursor: { after: [{ field: "age", value: 24 }] },
           limit: 2,
         });
 

@@ -11,7 +11,12 @@ export interface WhereVisitor<R, T = Record<string, unknown>> {
   or: (children: R[]) => R;
 }
 
-type PaginationCriterion<T> = { field: FieldName<T>; direction: "asc" | "desc"; path?: string[] };
+type PaginationCriterion<T> = {
+  field: FieldName<T>;
+  direction: "asc" | "desc";
+  path?: string[];
+  value: unknown;
+};
 
 /**
  * Iterative fold over a Where AST. The traversal is backend-agnostic;
@@ -148,7 +153,6 @@ export function getPaginationFilter<T = Record<string, unknown>>(
   const criteria = getPaginationCriteria(cursor, sortBy);
   if (criteria.length === 0) return undefined;
 
-  const cursorValues = cursor.after as Record<string, unknown>;
   const orClauses: Where<T>[] = [];
 
   for (let i = 0; i < criteria.length; i++) {
@@ -159,7 +163,7 @@ export function getPaginationFilter<T = Record<string, unknown>>(
         field: prev.field,
         path: prev.path,
         op: "eq",
-        value: cursorValues[prev.field],
+        value: prev.value,
       });
     }
     const curr = criteria[i]!;
@@ -167,7 +171,7 @@ export function getPaginationFilter<T = Record<string, unknown>>(
       field: curr.field,
       path: curr.path,
       op: curr.direction === "desc" ? "lt" : "gt",
-      value: cursorValues[curr.field],
+      value: curr.value,
     });
     orClauses.push({ and: andClauses });
   }
@@ -182,23 +186,44 @@ export function getPaginationCriteria<T = Record<string, unknown>>(
   cursor: Cursor<T>,
   sortBy?: SortBy<T>[],
 ): PaginationCriterion<T>[] {
-  const cursorValues = cursor.after as Record<string, unknown>;
   const criteria: PaginationCriterion<T>[] = [];
   if (sortBy !== undefined && sortBy.length > 0) {
     for (let i = 0; i < sortBy.length; i++) {
       const s = sortBy[i]!;
-      if (cursorValues[s.field] !== undefined) {
-        criteria.push({ field: s.field, direction: s.direction ?? "asc", path: s.path });
+      let found: (typeof cursor.after)[number] | undefined;
+      for (let j = 0; j < cursor.after.length; j++) {
+        const e = cursor.after[j]!;
+        if (e.field === s.field && pathsEqual(e.path, s.path)) {
+          found = e;
+          break;
+        }
+      }
+      if (found !== undefined) {
+        criteria.push({
+          field: s.field,
+          direction: s.direction ?? "asc",
+          path: s.path,
+          value: found.value,
+        });
       }
     }
   } else {
-    const keys = Object.keys(cursorValues);
-    for (let i = 0; i < keys.length; i++) {
-      // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- cursor keys are validated by callers against T
-      criteria.push({ field: keys[i]! as FieldName<T>, direction: "asc", path: undefined });
+    for (let i = 0; i < cursor.after.length; i++) {
+      const e = cursor.after[i]!;
+      criteria.push({ field: e.field, direction: "asc", path: e.path, value: e.value });
     }
   }
   return criteria;
+}
+
+function pathsEqual(a: string[] | undefined, b: string[] | undefined): boolean {
+  if (a === undefined && b === undefined) return true;
+  if (a === undefined || b === undefined) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
 }
 
 export function fnv1aHash(s: string): string {
